@@ -10,3 +10,5 @@ This section documents the public API of `gwmock-data`.
 - **[Input and output](io.md)** — `read_hdf5`, `write_hdf5`.
 - **[HDF5](hdf5.md)** — `Group`, `Dataset`, `read`, `write`: HDF5 files with or
   without h5py.
+- **[Multichannel stack](multichannel.md)** — `DetectorStrainStack`: aligned
+  strains for a fixed list of detectors.
