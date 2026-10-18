@@ -22,6 +22,8 @@ dependencies = [
   "numpy>=2.2",
   # Pure-Python HDF5 reader: HDF5 input without h5py, which has no wheel for the newest Python yet.
   "pyfive>=1.2.1", # 1.2.0 imports fsspec without declaring it
+  # Timing of the multichannel series is reported as astropy quantities, as gwmock reads it.
+  "astropy>=7.0",
 ]
 
 [project.optional-dependencies]
@@ -85,6 +87,8 @@ branch = true
 
 [tool.coverage.report]
 fail_under = 0
+# An @overload is a type declaration whose body never runs.
+exclude_also = ["@overload"]
 
 [tool.pytest.ini_options]
 addopts = "--cov-report xml:coverage.xml --cov src --cov-append -m 'not integration' --cov-report=term-missing"

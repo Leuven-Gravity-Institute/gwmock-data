@@ -12,3 +12,8 @@ This section documents the public API of `gwmock-data`.
   without h5py.
 - **[Multichannel stack](multichannel.md)** — `DetectorStrainStack`: aligned
   strains for a fixed list of detectors.
+- **[Multichannel time series](multichannel_series.md)** —
+  `MultichannelTimeSeries`: several channels on one grid, injected into segment
+  by segment, and `MultichannelTimeSeriesList`, an ordered list of them.
+- **[Injection](injection.md)** — adding one series into another, with
+  sub-sample offsets resampled by the **[shared kernel](resampling.md)**.
