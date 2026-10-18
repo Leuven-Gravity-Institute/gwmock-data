@@ -14,6 +14,7 @@ import pytest
 
 from gwmock_data import hdf5
 from gwmock_data.hdf5 import Dataset, Group
+from gwmock_data.hdf5 import _writer as hdf5_writer
 
 try:
     import h5py
@@ -326,3 +327,59 @@ def test_members_may_be_a_one_shot_iterator(tmp_path):
     back = hdf5.read(tmp_path / "tree.h5", backend="builtin", members=(name for name in ["i8"]))
 
     assert list(back.members) == ["i8"]
+
+
+@pytest.mark.parametrize("length", [0, 5, 70_000, 300_000])
+def test_a_string_attribute_of_any_length_round_trips(tmp_path, length):
+    """String attributes are variable-length, so one far beyond an object header message's 64 KiB still fits."""
+    text = ("ℏ·" * length)[:length]
+    hdf5.write(
+        Group({"x": Dataset(np.zeros(2), {"note": text})}, {"record": text, "short": "a"}),
+        tmp_path / "s.h5",
+        backend="builtin",
+    )
+
+    root = hdf5.read(tmp_path / "s.h5", backend="builtin")
+
+    assert root.attrs == {"record": text, "short": "a"}
+    assert root.members["x"].attrs == {"note": text}
+
+
+@_needs_h5py
+def test_h5py_reads_string_attributes_as_it_writes_them(tmp_path):
+    """As variable-length UTF-8 strings: h5py hands them back as ``str``, the same as from its own files."""
+    long = "x" * 100_000
+    hdf5.write(
+        Group({"x": Dataset(np.zeros(2), {"unit": "strain"})}, {"record": long}), tmp_path / "s.h5", backend="builtin"
+    )
+
+    with h5py.File(tmp_path / "s.h5", "r") as handle:
+        assert handle.attrs["record"] == long
+        assert handle["x"].attrs["unit"] == "strain"
+        assert h5py.check_string_dtype(handle.attrs.get_id("record").dtype).length is None
+
+
+def test_one_heap_object_per_distinct_string(tmp_path):
+    """A string held by several attributes is stored once; the file stays reproducible."""
+    root = Group({"a": Dataset(np.zeros(1), {"unit": "strain"}), "b": Dataset(np.zeros(1), {"unit": "strain"})})
+
+    encoded = hdf5_writer.encode(root)
+
+    assert encoded.count(b"GCOL") == 1
+    assert encoded.count(b"strain") == 1
+    assert encoded == hdf5_writer.encode(root)
+
+
+def test_a_numeric_attribute_too_large_for_its_message_is_refused(tmp_path):
+    """Only strings move to the heap; a numeric attribute past 64 KiB is refused with the reason, not a struct error."""
+    with pytest.raises(ValueError, match="must fit in 65535 bytes"):
+        hdf5.write(Group({}, {"big": np.zeros(10_000)}), tmp_path / "big.h5", backend="builtin")
+    assert not (tmp_path / "big.h5").exists()
+
+
+@pytest.mark.parametrize("backend", ["builtin", pytest.param("h5py", marks=_needs_h5py)])
+def test_a_string_attribute_holding_a_nul_is_refused(tmp_path, backend):
+    """h5py cannot store one and stops reading at the first, so neither backend writes it."""
+    with pytest.raises(ValueError, match="'note' contains a NUL character"):
+        hdf5.write(Group({}, {"note": "before\0after"}), tmp_path / "nul.h5", backend=backend)
+    assert not (tmp_path / "nul.h5").exists()
