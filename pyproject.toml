@@ -34,9 +34,9 @@ jax = ["jax>=0.5.0"]
 dev = [
   # The tests exercise HDF5, GWpy conversion and JAX-backed samples; none is a runtime dependency.
   # h5py publishes no wheel for Python 3.15 yet, and GWpy needs it; their tests skip there.
-  "gwpy>=4.0.0; python_version < '3.15'",
-  "h5py>=3.12; python_version < '3.15'",
-  "jax>=0.5.0",
+  "gwpy>=4.1.0; python_version < '3.15'",
+  "h5py>=3.16.0; python_version < '3.15'",
+  "jax>=0.11.2",
   "ruff>=0.17.0",
   "prek>=0.5.5",
   "pytest-github-actions-annotate-failures>=0.4.2",
