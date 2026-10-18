@@ -267,3 +267,61 @@ def test_a_non_contiguous_array_is_written_in_order(tmp_path):
     hdf5.write(Group({"view": Dataset(view)}), tmp_path / "view.h5", backend="builtin")
 
     np.testing.assert_array_equal(hdf5.read(tmp_path / "view.h5", backend="builtin").members["view"].data, view)
+
+
+@pytest.mark.parametrize("backend", ["builtin", pytest.param("h5py", marks=_needs_h5py)])
+def test_reading_only_some_members(tmp_path, backend, monkeypatch):
+    """Only the named top-level members are read, in the order asked; absent names are skipped."""
+    hdf5.write(_tree(), tmp_path / "tree.h5", backend="builtin")
+
+    back = hdf5.read(tmp_path / "tree.h5", backend=backend, members=["i8", "group", "missing", "i8"])
+
+    assert list(back.members) == ["i8", "group"]
+    _assert_same(back.members["i8"].data, _DATA["i8"])
+    np.testing.assert_array_equal(back.members["group"].members["inner"].data, np.arange(3.0))
+    assert back.attrs["schema"] == "1.0.0"
+
+
+def test_members_not_asked_for_are_never_read(tmp_path, monkeypatch):
+    """The point of selecting: an unrequested member's data is not touched."""
+    pyfive = pytest.importorskip("pyfive")
+    hdf5.write(_tree(), tmp_path / "tree.h5", backend="builtin")
+    read_names = []
+    original = pyfive.Dataset.__getitem__
+
+    def recording(self, key):
+        read_names.append(self.name)
+        return original(self, key)
+
+    monkeypatch.setattr(pyfive.Dataset, "__getitem__", recording)
+    hdf5.read(tmp_path / "tree.h5", backend="builtin", members=["f64"])
+
+    assert [name.strip("/") for name in read_names] == ["f64"]
+
+
+@pytest.mark.parametrize("members", ["data", b"data"])
+def test_a_single_string_of_members_is_refused(tmp_path, members):
+    """A bare string would be read as one-character names and select nothing, silently."""
+    hdf5.write(Group({"data": Dataset(np.zeros(2))}), tmp_path / "one.h5", backend="builtin")
+
+    with pytest.raises(TypeError, match="collection of names"):
+        hdf5.read(tmp_path / "one.h5", members=members)
+
+
+@pytest.mark.parametrize("backend", ["builtin", pytest.param("h5py", marks=_needs_h5py)])
+@pytest.mark.parametrize("name", ["group/inner", "", ".", ".."])
+def test_a_member_path_is_refused(tmp_path, backend, name):
+    """Only top-level members can be selected; a path into a group would come back flattened under its path."""
+    hdf5.write(_tree(), tmp_path / "tree.h5", backend="builtin")
+
+    with pytest.raises(ValueError, match="cannot name an HDF5 group member"):
+        hdf5.read(tmp_path / "tree.h5", backend=backend, members=[name])
+
+
+def test_members_may_be_a_one_shot_iterator(tmp_path):
+    """The names are checked and then used; a generator must survive both."""
+    hdf5.write(_tree(), tmp_path / "tree.h5", backend="builtin")
+
+    back = hdf5.read(tmp_path / "tree.h5", backend="builtin", members=(name for name in ["i8"]))
+
+    assert list(back.members) == ["i8"]

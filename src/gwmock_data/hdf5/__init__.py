@@ -13,6 +13,7 @@ writes data uncompressed; files h5py wrote with gzip compression read either way
 from __future__ import annotations
 
 import importlib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -90,6 +91,12 @@ def write(root: Group, path: str | Path, *, backend: Backend = "auto", compressi
         _write_h5py(handle, root, compression)
 
 
+def _check_name(name: str) -> None:
+    """Refuse a member name that is empty, ``.`` or ``..``, or contains ``/``, which HDF5 reads as a path."""
+    if not name or "/" in name or name in (".", ".."):
+        raise ValueError(f"{name!r} cannot name an HDF5 group member: it must be non-empty and contain no '/'.")
+
+
 def _normalised(group: Group) -> Group:
     """``group`` with every dataset's data and every attribute as an array.
 
@@ -98,8 +105,7 @@ def _normalised(group: Group) -> Group:
     """
     members: dict[str, Group | Dataset] = {}
     for name, member in group.members.items():
-        if not name or "/" in name or name in (".", ".."):
-            raise ValueError(f"{name!r} cannot name an HDF5 group member: it must be non-empty and contain no '/'.")
+        _check_name(name)
         if isinstance(member, Group):
             members[name] = _normalised(member)
         else:
@@ -128,7 +134,7 @@ def _write_h5py(handle: Any, group: Group, compression: str | None) -> None:
             dataset.attrs[key] = value if isinstance(value, str) else _array(value)
 
 
-def read(path: str | Path, *, backend: Backend = "auto") -> Group:
+def read(path: str | Path, *, backend: Backend = "auto", members: Iterable[str] | None = None) -> Group:
     """Read the HDF5 file at ``path`` into a :class:`Group`.
 
     Datasets are read into NumPy arrays (a scalar as a 0-d array). A scalar string, as a dataset or an
@@ -138,10 +144,23 @@ def read(path: str | Path, *, backend: Backend = "auto") -> Group:
         path: Input file.
         backend: ``"h5py"``, ``"builtin"`` (pyfive), or ``"auto"`` for h5py when it is installed and pyfive
             otherwise.
+        members: Names of the top-level members to read; the others are not read at all, which matters for a
+            large file of which only a few columns are wanted. A name the file lacks is absent from the
+            result. ``None``, the default, reads every member. The file's own attributes are always read.
 
     Raises:
         ModuleNotFoundError: If ``backend="h5py"`` and h5py is not installed.
+        TypeError: If ``members`` is a single string rather than a collection of names.
+        ValueError: If a name in ``members`` is empty, ``.`` or ``..``, or contains ``/``: only top-level members
+            can be selected, not paths into groups.
     """
+    if isinstance(members, (str, bytes)):
+        # A string is iterable, so it would be read as one-character names and silently select nothing.
+        raise TypeError(f"members must be a collection of names, such as [{members!r}]; got a single string.")
+    if members is not None:
+        members = list(members)
+        for name in members:
+            _check_name(name)
     h5py = _h5py() if backend in ("auto", "h5py") else None
     if backend == "h5py" and h5py is None:
         raise ModuleNotFoundError(
@@ -150,16 +169,17 @@ def read(path: str | Path, *, backend: Backend = "auto") -> Group:
         )
     if h5py is not None:
         with h5py.File(Path(path), "r") as handle:
-            return _read_tree(handle, lambda item: isinstance(item, h5py.Group))
+            return _read_tree(handle, lambda item: isinstance(item, h5py.Group), members)
     pyfive = importlib.import_module("pyfive")
     with pyfive.File(str(path)) as handle:
-        return _read_tree(handle, lambda item: isinstance(item, pyfive.Group))
+        return _read_tree(handle, lambda item: isinstance(item, pyfive.Group), members)
 
 
-def _read_tree(handle: Any, is_group: Any) -> Group:
-    """Copy an open h5py or pyfive group, recursively, into a :class:`Group`."""
+def _read_tree(handle: Any, is_group: Any, only: Iterable[str] | None = None) -> Group:
+    """Copy an open h5py or pyfive group, recursively, into a :class:`Group`; at the top, only ``only``."""
+    names = list(handle) if only is None else [name for name in dict.fromkeys(only) if name in handle]
     members: dict[str, Group | Dataset] = {}
-    for name in handle:
+    for name in names:
         item = handle[name]
         if is_group(item):
             members[name] = _read_tree(item, is_group)
