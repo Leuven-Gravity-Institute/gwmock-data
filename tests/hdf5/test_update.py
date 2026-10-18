@@ -178,8 +178,8 @@ def test_a_compressed_file_updated_without_h5py_keeps_its_values(tmp_path):
 
     with h5py.File(path, "r") as handle:
         np.testing.assert_array_equal(handle["x"][()], np.linspace(0.0, 1.0, 1000))
-        # The built-in writer stores strings fixed-length, which h5py hands back as bytes.
-        assert handle["x"].attrs["unit"] == b"strain"
+        # A variable-length string, as h5py itself writes one, so h5py hands it back as ``str``.
+        assert handle["x"].attrs["unit"] == "strain"
     assert hdf5.read(path, data=False).members["x"].attrs["unit"] == "strain"
 
 
@@ -211,3 +211,16 @@ def test_what_is_read_holds_no_reference_to_the_file(tmp_path, backend):
     arrays = [root.members["H1:STRAIN"].data, root.members["H1:STRAIN"].attrs["x0"]]
     arrays += [root.members["metadata"].members["record"].attrs["version"]]
     assert all(array.flags.owndata for array in arrays)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_string_holding_a_nul_changes_nothing(tmp_path, backend):
+    """Refused before the file is touched, on either backend."""
+    path = tmp_path / "strain.h5"
+    _strain_file(path)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="contains a NUL character"):
+        hdf5.update_attrs(path, {"": {"run": "a\0b"}}, backend=backend)
+
+    assert path.read_bytes() == before

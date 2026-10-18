@@ -3,11 +3,12 @@
 The classic layout is what the HDF5 library writes by default and what every reader understands, pure-Python
 ones included: a version 0 superblock, version 1 object headers, and groups stored as a symbol table (a version
 1 B-tree, one symbol-table node, and a local heap of member names). Data is stored contiguously, little-endian
-and uncompressed.
+and uncompressed. A string attribute is stored as h5py stores one, a variable-length UTF-8 string kept in a
+global heap collection, so that its length is not bounded by the 64 KiB an object header message can hold.
 
 The structures used and their byte layouts are those of the HDF5 File Format Specification, version 2.0
 (sections II.A "Superblock", III.A "B-trees", III.B "Group Symbol Table Nodes", III.C "Symbol Table Entry",
-III.D "Local Heaps", IV.A "Data Object Headers"). Each group's members fit in one symbol-table node: the file's
+III.D "Local Heaps", III.E "Global Heap", IV.A "Data Object Headers"). Each group's members fit in one symbol-table node: the file's
 group leaf node K, a superblock field, is chosen large enough for the largest group, so every B-tree is a single
 leaf node.
 """
@@ -33,6 +34,10 @@ _INTERNAL_K = 16
 
 #: Bytes in a double-precision float.
 _FLOAT64_SIZE = 8
+#: Largest object header message: its size is a 16-bit field.
+_MAX_MESSAGE_SIZE = 0xFFFF
+#: Smallest global heap collection the HDF5 library accepts.
+_MIN_COLLECTION_SIZE = 4096
 
 # Object header message types.
 _DATASPACE, _DATATYPE, _FILL_VALUE, _LAYOUT, _ATTRIBUTE, _SYMBOL_TABLE = 0x01, 0x03, 0x05, 0x08, 0x0C, 0x11
@@ -104,13 +109,57 @@ def dataspace_message(shape: tuple[int, ...]) -> bytes:
     return struct.pack("<BBBB", 2, len(shape), 0, kind) + b"".join(struct.pack("<Q", size) for size in shape)
 
 
-def attribute_message(name: str, value: np.ndarray) -> bytes:
-    """Encode an attribute message, version 1 (specification IV.A.2.m)."""
+def _variable_length_string_message() -> bytes:
+    """Encode the datatype of a variable-length UTF-8 string, version 1 (specification IV.A.2.d, class 9).
+
+    Type 1 (string), null-terminated, UTF-8; elements are 16 bytes (a length and a global heap ID), and the base
+    type is a one-byte unsigned integer, as the HDF5 library writes it.
+    """
+    base = struct.pack("<B3BIHH", 0x10 | 0, 0, 0, 0, 1, 0, 8)
+    return struct.pack("<B3BI", 0x10 | 9, 0x01, 0x01, 0, 16) + base
+
+
+def attribute_message(name: str, value: np.ndarray | str, heap: dict[str, tuple[int, int]] | None = None) -> bytes:
+    """Encode an attribute message, version 1 (specification IV.A.2.m).
+
+    A ``str`` is written as a scalar variable-length string whose bytes are in the global heap collection at the
+    address and index ``heap`` gives for it.
+    """
     encoded_name = name.encode("utf-8") + b"\0"
-    datatype = datatype_message(value.dtype)
-    dataspace = dataspace_message(value.shape)
+    if isinstance(value, str):
+        address, index = (heap or {})[value]
+        datatype = _variable_length_string_message()
+        dataspace = dataspace_message(())
+        data = struct.pack("<IQI", len(value.encode("utf-8")), address, index)
+    else:
+        datatype = datatype_message(value.dtype)
+        dataspace = dataspace_message(value.shape)
+        data = _little_endian(value).tobytes()
     header = struct.pack("<BBHHH", 1, 0, len(encoded_name), len(datatype), len(dataspace))
-    return header + _pad8(encoded_name) + _pad8(datatype) + _pad8(dataspace) + _little_endian(value).tobytes()
+    message = header + _pad8(encoded_name) + _pad8(datatype) + _pad8(dataspace) + data
+    if len(_pad8(message)) > _MAX_MESSAGE_SIZE:
+        raise ValueError(
+            f"Attribute {name!r} is {len(data)} bytes; an attribute of the built-in writer must fit in "
+            f"{_MAX_MESSAGE_SIZE} bytes (strings excepted). Store it as a dataset, or install h5py."
+        )
+    return message
+
+
+def global_heap_collection(strings: list[str]) -> tuple[bytes, dict[str, int]]:
+    """Encode a global heap collection holding ``strings`` (specification III.E); return it and their indices.
+
+    Objects are numbered from 1 in the order given. Their reference count is 0, as the HDF5 library writes it for
+    variable-length data, and the space left is one free-space object (index 0), whose size counts its own header.
+    """
+    indices = {text: index for index, text in enumerate(strings, start=1)}
+    objects = b"".join(
+        struct.pack("<HHIQ", index, 0, 0, len(text.encode("utf-8"))) + _pad8(text.encode("utf-8"))
+        for text, index in indices.items()
+    )
+    size = max(_MIN_COLLECTION_SIZE, 16 + len(objects) + 16)
+    free = size - 16 - len(objects)
+    collection = b"GCOL" + struct.pack("<B3xQ", 1, size) + objects + struct.pack("<HHIQ", 0, 0, 0, free)
+    return collection + b"\0" * (size - len(collection)), indices
 
 
 def _little_endian_dtype(dtype: np.dtype) -> np.dtype:
@@ -163,6 +212,16 @@ class _File:
     def __init__(self, leaf_k: int) -> None:
         self.leaf_k = leaf_k
         self.buffer = bytearray(96)  # The superblock and the root group's entry, filled in last.
+        #: Where each string attribute's bytes are: the global heap collection's address and the object index.
+        self.heap: dict[str, tuple[int, int]] = {}
+
+    def strings(self, strings: list[str]) -> None:
+        """Place one global heap collection holding ``strings``, for the attributes that refer to them."""
+        if not strings:
+            return
+        collection, indices = global_heap_collection(strings)
+        address = self.place(collection)
+        self.heap = {text: (address, index) for text, index in indices.items()}
 
     def place(self, data: bytes) -> int:
         """Append ``data`` at an eight-byte boundary and return its address."""
@@ -184,7 +243,9 @@ class _File:
             # Layout, version 3, contiguous: address and size of the samples.
             (_LAYOUT, struct.pack("<BBQQ", 3, 1, data_address, len(raw))),
         ]
-        messages += [(_ATTRIBUTE, attribute_message(key, value)) for key, value in _attributes(dataset.attrs)]
+        messages += [
+            (_ATTRIBUTE, attribute_message(key, value, self.heap)) for key, value in _attributes(dataset.attrs)
+        ]
         return self.place(object_header(messages))
 
     def group(self, group: Group) -> tuple[int, int, int]:
@@ -224,7 +285,7 @@ class _File:
         btree_address = self.place(btree)
 
         messages = [(_SYMBOL_TABLE, struct.pack("<QQ", btree_address, heap_address))]
-        messages += [(_ATTRIBUTE, attribute_message(key, value)) for key, value in _attributes(group.attrs)]
+        messages += [(_ATTRIBUTE, attribute_message(key, value, self.heap)) for key, value in _attributes(group.attrs)]
         return self.place(object_header(messages)), btree_address, heap_address
 
 
@@ -235,15 +296,20 @@ def _symbol_table_entry(name_offset: int, header: int, scratch: tuple[int, int] 
     return struct.pack("<QQIIQQ", name_offset, header, 1, 0, *scratch)
 
 
-def _attributes(attrs: dict[str, object]) -> list[tuple[str, np.ndarray]]:
-    """Attributes as arrays, strings encoded as UTF-8 bytes; sorted by name for a reproducible file."""
-    result = []
-    for key in sorted(attrs):
-        value = attrs[key]
-        if isinstance(value, str):
-            value = np.bytes_(value.encode("utf-8"))
-        result.append((key, np.asarray(value)))
-    return result
+def _attributes(attrs: dict[str, object]) -> list[tuple[str, np.ndarray | str]]:
+    """Attributes as arrays, a ``str`` as it is; sorted by name for a reproducible file."""
+    return [(key, value if isinstance(value, str) else np.asarray(value)) for key, value in sorted(attrs.items())]
+
+
+def _string_attributes(group: Group) -> set[str]:
+    """Every distinct ``str`` attribute value in the tree, on groups and datasets alike."""
+    found = {value for value in group.attrs.values() if isinstance(value, str)}
+    for member in group.members.values():
+        if hasattr(member, "members"):
+            found |= _string_attributes(member)
+        else:
+            found |= {value for value in member.attrs.values() if isinstance(value, str)}
+    return found
 
 
 def _largest_group(group: Group) -> int:
@@ -257,6 +323,8 @@ def encode(root: Group) -> bytes:
     """Return the bytes of an HDF5 file holding ``root``."""
     leaf_k = max(4, -(-_largest_group(root) // 2))
     file = _File(leaf_k)
+    # Sorted so the file is reproducible; one heap object per distinct string, however many attributes hold it.
+    file.strings(sorted(_string_attributes(root)))
     header, btree, heap = file.group(root)
     end = len(file.buffer)
     superblock = _SIGNATURE + struct.pack("<8B", 0, 0, 0, 0, 0, 8, 8, 0)

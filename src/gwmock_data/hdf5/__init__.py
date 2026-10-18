@@ -7,8 +7,9 @@ HDF5 reader. Either way the files are ordinary HDF5: h5py, GWpy and the HDF5 too
 writes, and the built-in path reads what they write.
 
 The built-in writer covers what the gwmock packages store: datasets of booleans, integers, 32- and 64-bit floats,
-fixed-length strings and compound rows of those; attributes of numbers, arrays and strings; nested groups. It
-writes data uncompressed; files h5py wrote with gzip compression read either way.
+fixed-length strings and compound rows of those; attributes of numbers, arrays and strings, a string of any
+length (stored, as h5py stores it, as a variable-length string), a number or array up to 64 KiB; nested groups.
+It writes data uncompressed; files h5py wrote with gzip compression read either way.
 """
 
 from __future__ import annotations
@@ -80,6 +81,7 @@ def write(root: Group, path: str | Path, *, backend: Backend = "auto", compressi
     Raises:
         ModuleNotFoundError: If ``backend="h5py"`` and h5py is not installed.
         TypeError: If a dtype cannot be written.
+        ValueError: If a member name cannot name an HDF5 member, or a string attribute contains a NUL character.
     """
     # Before choosing a backend, so that the same tree means the same file whichever is installed.
     normalised = _normalised(root)
@@ -115,15 +117,35 @@ def _normalised(group: Group) -> Group:
         if isinstance(member, Group):
             members[name] = _normalised(member)
         else:
-            members[name] = Dataset(_array(member.data), {key: _array(value) for key, value in member.attrs.items()})
-    return Group(members, {key: _array(value) for key, value in group.attrs.items()})
+            members[name] = Dataset(_array(member.data), _attribute_arrays(member.attrs))
+    return Group(members, _attribute_arrays(group.attrs))
+
+
+def _attribute_arrays(attrs: dict[str, Any]) -> dict[str, Any]:
+    """Attributes as arrays, a ``str`` kept as it is: it is written as a variable-length string."""
+    return {key: _text(key, value) if isinstance(value, str) else _array(value) for key, value in attrs.items()}
+
+
+def _text(key: str, value: str) -> str:
+    """A string attribute, refused if it holds a NUL.
+
+    It is stored as a null-terminated variable-length string, as h5py stores one: h5py refuses to write a NUL into
+    one and stops reading at the first, so a string holding one would not read back the same everywhere.
+
+    Raises:
+        ValueError: If ``value`` contains a NUL character.
+    """
+    if "\0" in value:
+        raise ValueError(f"String attribute {key!r} contains a NUL character, which an HDF5 string cannot hold.")
+    return value
 
 
 def _write_h5py(handle: Any, group: Group, compression: str | None) -> None:
     """Write ``group``'s attributes and members into an open h5py group.
 
-    Strings are handed to h5py as ``str``, which it stores as variable-length UTF-8 strings, as GWpy does; the
-    built-in writer stores fixed-length ones. Both read back as ``str``.
+    Strings are handed to h5py as ``str``, which it stores as variable-length UTF-8 strings, as GWpy does. The
+    built-in writer does the same for attributes and stores a string dataset fixed-length; all read back as
+    ``str``.
     """
     for key, value in group.attrs.items():
         handle.attrs[key] = value if isinstance(value, str) else _array(value)
@@ -218,8 +240,8 @@ def update_attrs(path: str | Path, attrs: Mapping[str, Mapping[str, Any]], *, ba
     With h5py the file is changed in place. Without it the whole file is read, the attributes merged, and the
     result written beside the file and moved over it once complete, so a failed update leaves the file as it
     was; the rewritten file keeps the original's permissions, and a symlink is written through to its target.
-    The built-in writer does not compress and stores strings as fixed-length, so a file h5py wrote comes back
-    uncompressed when it is updated without h5py, holding the same values.
+    The built-in writer does not compress and stores a string dataset fixed-length, so a file h5py wrote comes
+    back uncompressed when it is updated without h5py, holding the same values.
 
     Args:
         path: The file to change.
@@ -235,12 +257,15 @@ def update_attrs(path: str | Path, attrs: Mapping[str, Mapping[str, Any]], *, ba
         ModuleNotFoundError: If ``backend="h5py"`` and h5py is not installed.
         TypeError: If the built-in writer cannot write a value the file holds, such as a half-precision
             float; the file is not changed.
-        ValueError: If a member path has an empty, ``.`` or ``..`` component.
+        ValueError: If a member path has an empty, ``.`` or ``..`` component, or a string contains a NUL
+            character.
     """
     targets = {member: _member_parts(member) for member in attrs}
     # Every value is checked and every member found before anything is changed, so a bad value or a
     # missing member changes nothing.
-    converted = {member: {key: _attribute(value) for key, value in values.items()} for member, values in attrs.items()}
+    converted = {
+        member: {key: _attribute(key, value) for key, value in values.items()} for member, values in attrs.items()
+    }
     h5py = _h5py() if backend in ("auto", "h5py") else None
     if backend == "h5py" and h5py is None:
         raise ModuleNotFoundError(
@@ -273,7 +298,7 @@ def update_attrs(path: str | Path, attrs: Mapping[str, Mapping[str, Any]], *, ba
         partial.unlink(missing_ok=True)
 
 
-def _attribute(value: Any) -> Any:
+def _attribute(key: str, value: Any) -> Any:
     """An attribute value as h5py stores it: a ``str`` as it is, anything else as a NumPy array.
 
     Checked here, before the file is touched, so that a value h5py would refuse half-way through an update
@@ -282,9 +307,10 @@ def _attribute(value: Any) -> Any:
 
     Raises:
         TypeError: If the value is not a number, a string, or an array of numbers or bytes.
+        ValueError: If a string contains a NUL character.
     """
     if isinstance(value, str):
-        return value
+        return _text(key, value)
     array = _array(value)
     if array.dtype.kind in "OUMm":
         raise TypeError(
