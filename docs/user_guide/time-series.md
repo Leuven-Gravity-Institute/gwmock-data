@@ -97,3 +97,19 @@ Code written against GWpy's `TimeSeries` changes as follows:
 | arithmetic, `fft`, `plot`, ... | `ts.to_gwpy()` first                       |
 
 Code that needs a GWpy object can convert any series with `to_gwpy()`.
+
+## Several detectors
+
+`gwmock_data.DetectorStrainStack` holds one aligned series per detector, in a
+fixed order: every channel has the same start time, sample rate, length and
+unit, and `stack.data` is the `(n_detectors, n_samples)` array.
+
+```python
+from gwmock_data import DetectorStrainStack
+
+stack = DetectorStrainStack.from_mapping(["H1", "L1"], {"H1": h1, "L1": l1})
+stack.write("strain.h5")  # also "npy", "txt", and "gwf" (the [gwpy] extra)
+again = DetectorStrainStack.read("strain.h5", format="hdf5")
+```
+
+HDF5 needs no extra; the detector order is stored in the file.

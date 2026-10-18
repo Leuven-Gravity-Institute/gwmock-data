@@ -53,6 +53,7 @@ nav = [
     { "Sampling grid" = "api/sampling_grid.md" },
     { "Input and output" = "api/io.md" },
     { "HDF5" = "api/hdf5.md" },
+    { "Multichannel stack" = "api/multichannel.md" },
   ] },
   { "Contributing" = "contributing.md" },
   { "Security" = "security.md" },

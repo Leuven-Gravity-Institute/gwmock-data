@@ -40,6 +40,9 @@ dev = [
   # h5py publishes no wheel for Python 3.15 yet, and GWpy needs it; their tests skip there.
   "gwpy>=4.1.0; python_version < '3.15'",
   "h5py>=3.16.0; python_version < '3.15'",
+  # A frame library (lalframe) for the GWF tests; lalsuite publishes no wheel for Python 3.15, or for
+  # Windows at all, where those tests skip.
+  "lalsuite>=7.26; python_version < '3.15' and sys_platform != 'win32'",
   "jax>=0.11.2",
   "ruff>=0.17.0",
   "prek>=0.5.5",
