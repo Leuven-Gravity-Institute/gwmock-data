@@ -215,6 +215,7 @@ def test_the_h5py_backend_without_h5py_names_the_extra(monkeypatch, tmp_path):
     for call in (
         lambda: hdf5.write(Group(), tmp_path / "x.h5", backend="h5py"),
         lambda: hdf5.read(tmp_path / "x.h5", backend="h5py"),
+        lambda: hdf5.update_attrs(tmp_path / "x.h5", {"": {"a": 1}}, backend="h5py"),
     ):
         with pytest.raises(ModuleNotFoundError, match=r"pip install 'gwmock-data\[hdf5\]'"):
             call()
