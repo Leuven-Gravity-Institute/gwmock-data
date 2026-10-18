@@ -65,7 +65,9 @@ def datatype_message(dtype: np.dtype) -> bytes:
             sign, exponent_location, exponent_size, mantissa_size, bias = 31, 23, 8, 23, 127
         # Byte 0: little-endian, no padding, mantissa normalised with an implied leading one (bits 4-5 = 2).
         header = struct.pack("<B3BI", 0x10 | 1, 0x20, sign, 0, dtype.itemsize)
-        properties = struct.pack("<HHBBBBI", 0, 8 * dtype.itemsize, exponent_location, exponent_size, 0, mantissa_size, bias)
+        properties = struct.pack(
+            "<HHBBBBI", 0, 8 * dtype.itemsize, exponent_location, exponent_size, 0, mantissa_size, bias
+        )
         return header + properties
     if dtype.kind == "S":
         # Null-padded, UTF-8: what h5py writes for a NumPy bytes array.

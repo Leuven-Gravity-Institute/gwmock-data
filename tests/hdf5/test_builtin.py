@@ -41,7 +41,7 @@ _DATA = {
     "bytes": np.array([b"H1", b"L1:STRAIN"]),
     "records": _RECORDS,
     "scalar": np.float64(2.5),
-    "text": "{\"seed\": 7, \"name\": \"\\u00e9t\\u00e9\"}",
+    "text": '{"seed": 7, "name": "\\u00e9t\\u00e9"}',
     "empty": np.zeros(0),
     "3d": np.arange(24.0).reshape(2, 3, 4),
 }
@@ -171,7 +171,9 @@ def test_a_name_hdf5_would_read_as_a_path_is_refused(tmp_path, name, backend):
 @pytest.mark.parametrize("order", [">", "<", "="])
 def test_compound_rows_in_any_byte_order_keep_their_values(tmp_path, order):
     """The datatype declares little-endian, so big-endian fields must be converted, offsets kept."""
-    dtype = np.dtype({"names": ["i", "f", "b"], "formats": [f"{order}i4", f"{order}f8", "u1"], "offsets": [0, 8, 16], "itemsize": 24})
+    dtype = np.dtype(
+        {"names": ["i", "f", "b"], "formats": [f"{order}i4", f"{order}f8", "u1"], "offsets": [0, 8, 16], "itemsize": 24}
+    )
     rows = np.zeros(2, dtype=dtype)
     rows["i"] = [0x01020304, -5]
     rows["f"] = [1.5, -2.25e300]
@@ -222,7 +224,7 @@ def test_a_written_file_is_byte_for_byte_reproducible(tmp_path):
 @pytest.mark.parametrize("kind", ["i2", "u4", "i8", "f4", "f8"])
 def test_every_numeric_dtype_is_made_explicitly_little_endian(order, kind):
     """Checked on the dtype, so it holds on any host: native order means big-endian on a big-endian one."""
-    from gwmock_data.hdf5._writer import _little_endian_dtype  # noqa: PLC0415
+    from gwmock_data.hdf5._writer import _little_endian_dtype
 
     dtype = np.dtype(order + kind)
     compound = np.dtype([("x", dtype), ("label", "S4"), ("flag", "u1")])
@@ -232,5 +234,7 @@ def test_every_numeric_dtype_is_made_explicitly_little_endian(order, kind):
     converted = _little_endian_dtype(compound)
     assert converted.fields["x"][0].str == "<" + kind
     assert converted.fields["label"][0] == np.dtype("S4")
-    assert [converted.fields[name][1] for name in ("x", "label", "flag")] == [compound.fields[name][1] for name in ("x", "label", "flag")]
+    assert [converted.fields[name][1] for name in ("x", "label", "flag")] == [
+        compound.fields[name][1] for name in ("x", "label", "flag")
+    ]
     assert converted.itemsize == compound.itemsize
