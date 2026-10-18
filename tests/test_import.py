@@ -1,4 +1,4 @@
-"""Test importing the python-python_package_template package and its modules."""
+"""Test importing the gwmock_data package and its modules."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import python_package_template
+import gwmock_data
 
 
 def get_all_submodules(package):
@@ -27,12 +27,12 @@ def get_all_submodules(package):
 
 
 def test_import_main_package():
-    """Test that the main python_package_template package can be imported."""
-    assert hasattr(python_package_template, "__version__")
-    assert python_package_template.__version__ is not None
+    """Test that the main gwmock_data package can be imported."""
+    assert hasattr(gwmock_data, "__version__")
+    assert gwmock_data.__version__ is not None
 
 
-@pytest.mark.parametrize("module_name", get_all_submodules(python_package_template))
+@pytest.mark.parametrize("module_name", get_all_submodules(gwmock_data))
 def test_import_submodule(module_name):
     """Test that all submodules can be imported."""
     __import__(module_name)
@@ -49,7 +49,7 @@ def test_lazy_import_defers_importlib_metadata():
     env = {k: v for k, v in os.environ.items() if not k.startswith(("COV_", "COVERAGE_", "PYTHON_LAZY_"))}
     code = (
         "import sys; sys.path.insert(0, 'src'); "
-        "import python_package_template as p; "
+        "import gwmock_data as p; "
         "before = 'importlib.metadata' in sys.modules; "
         "p.__version__; "
         "print(before, 'importlib.metadata' in sys.modules)"
