@@ -1,6 +1,5 @@
 cff-version: 1.2.0
-title:
-    'gwmock-data: Shared data structures for the gwmock packages'
+title: 'gwmock-data: Shared data structures for the gwmock packages'
 license: 'BSD-3-Clause'
 type: software
 authors:

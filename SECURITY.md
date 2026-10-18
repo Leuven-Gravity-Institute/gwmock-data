@@ -1,7 +1,7 @@
 # Security Policy
 
-We will support the latest stable release of `gwmock-data`. Please
-ensure you are using the most recent version before reporting a security issue.
+We will support the latest stable release of `gwmock-data`. Please ensure you
+are using the most recent version before reporting a security issue.
 
 | Version | Supported |
 | ------- | --------- |
@@ -16,8 +16,8 @@ ensure you are using the most recent version before reporting a security issue.
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in `gwmock-data`, please
-report it using **GitHub's private vulnerability reporting feature**:
+If you discover a security vulnerability in `gwmock-data`, please report it
+using **GitHub's private vulnerability reporting feature**:
 
 <!-- prettier-ignore-start -->
 

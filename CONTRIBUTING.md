@@ -1,7 +1,7 @@
 # Contributing to gwmock-data
 
-🎉 Thank you for your interest in contributing to `gwmock-data`!
-Your ideas, fixes, and improvements are welcome and appreciated.
+🎉 Thank you for your interest in contributing to `gwmock-data`! Your ideas,
+fixes, and improvements are welcome and appreciated.
 
 Whether you’re fixing a typo, reporting a bug, suggesting a feature, or
 submitting a pull request—this guide will help you get started.
