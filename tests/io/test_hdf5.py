@@ -1,4 +1,4 @@
-"""HDF5 in GWpy's ``TimeSeriesDict`` layout, written and read with h5py alone.
+"""HDF5 in GWpy's ``TimeSeriesDict`` layout, through h5py when it is installed and the built-in path otherwise.
 
 A file written here must load with GWpy exactly, and a file GWpy wrote must load here exactly: the
 point of the layout is that the two are interchangeable.
@@ -146,23 +146,26 @@ def test_a_broken_installation_is_not_reported_as_missing(monkeypatch, tmp_path)
     assert "gwmock-data[" not in str(raised.value)
 
 
-@pytest.mark.parametrize(
-    ("call", "package", "extra"),
-    [
-        (lambda path: write_hdf5({"H1": _series()}, path), "h5py", "hdf5"),
-        (read_hdf5, "h5py", "hdf5"),
-    ],
-)
-def test_a_missing_package_names_its_extra(monkeypatch, tmp_path, call, package, extra):
-    """HDF5 needs only h5py, from the ``hdf5`` extra."""
+@pytest.mark.parametrize("backend_hidden", ["h5py"])
+def test_without_h5py_the_built_in_backend_round_trips(monkeypatch, tmp_path, backend_hidden):
+    """Hidden h5py: the file is written by the built-in writer and read with pyfive, and nothing is lost."""
     real_import = importlib.import_module
 
     def missing(name, *args, **kwargs):
-        if name == package or name.startswith(f"{package}."):
-            raise ModuleNotFoundError(f"No module named {package!r}", name=package)
+        if name == backend_hidden or name.startswith(f"{backend_hidden}."):
+            raise ModuleNotFoundError(f"No module named {backend_hidden!r}", name=backend_hidden)
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(importlib, "import_module", missing)
+    written = {"H1": _series(4096.0, name="H1:STRAIN", unit="strain"), "L1": _series(3000.0)}
 
-    with pytest.raises(ModuleNotFoundError, match=rf"pip install 'gwmock-data\[{extra}\]'"):
-        call(tmp_path / "out")
+    write_hdf5(written, tmp_path / "out.h5")
+    back = read_hdf5(tmp_path / "out.h5")
+
+    assert list(back) == ["H1", "L1"]
+    for key, series in written.items():
+        np.testing.assert_array_equal(back[key].data, series.data)
+        assert back[key].t0 == series.t0
+        assert back[key].sample_rate == pytest.approx(series.sample_rate, rel=1e-15)
+        assert back[key].name == series.name
+        assert back[key].unit == series.unit
