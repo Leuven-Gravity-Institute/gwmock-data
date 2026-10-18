@@ -93,6 +93,7 @@ def _assert_tree(read_root: Group):
 
 
 def test_the_built_in_writer_round_trips_through_pyfive(tmp_path):
+    """Without h5py: the built-in writer, then pyfive, return every member and attribute unchanged."""
     hdf5.write(_tree(), tmp_path / "builtin.h5", backend="builtin")
 
     _assert_tree(hdf5.read(tmp_path / "builtin.h5", backend="builtin"))
@@ -100,6 +101,7 @@ def test_the_built_in_writer_round_trips_through_pyfive(tmp_path):
 
 @_needs_h5py
 def test_h5py_reads_what_the_built_in_writer_writes(tmp_path):
+    """h5py reads every value of a built-in file, with the dtypes and scalar shapes it was written with."""
     hdf5.write(_tree(), tmp_path / "builtin.h5", backend="builtin")
 
     _assert_tree(hdf5.read(tmp_path / "builtin.h5", backend="h5py"))
@@ -113,6 +115,7 @@ def test_h5py_reads_what_the_built_in_writer_writes(tmp_path):
 
 @_needs_h5py
 def test_the_built_in_path_reads_what_h5py_writes_compressed(tmp_path):
+    """Pyfive reads what h5py writes, gzip-compressed datasets included."""
     hdf5.write(_tree(), tmp_path / "h5py.h5", backend="h5py", compression="gzip")
 
     _assert_tree(hdf5.read(tmp_path / "h5py.h5", backend="builtin"))
@@ -120,6 +123,7 @@ def test_the_built_in_path_reads_what_h5py_writes_compressed(tmp_path):
 
 @_needs_h5py
 def test_gwpy_reads_a_time_series_the_built_in_writer_writes(tmp_path):
+    """GWpy loads a series the built-in writer wrote, with its timing, unit and name."""
     timeseries = pytest.importorskip("gwpy.timeseries")
     samples = np.random.default_rng(1).normal(size=4096)
     attrs = {"x0": 1_400_000_000.0, "dx": 1 / 4096, "xunit": "s", "unit": "strain", "name": "H1:STRAIN"}
@@ -151,6 +155,7 @@ def test_groups_of_any_size_round_trip(tmp_path, count):
 
 
 def test_names_are_stored_as_given_and_read_in_byte_order(tmp_path):
+    """Member names, non-ASCII included, are kept; HDF5 lists them in byte order."""
     names = ["b", "a", "B", "H1:STRAIN", "été", "with space"]
     hdf5.write(Group({name: Dataset(np.zeros(1)) for name in names}), tmp_path / "names.h5", backend="builtin")
 
@@ -191,11 +196,13 @@ def test_compound_rows_in_any_byte_order_keep_their_values(tmp_path, order):
 
 @pytest.mark.parametrize("value", [np.zeros(2, dtype=np.complex128), np.array(["text"]), np.array([object()])])
 def test_an_unsupported_dtype_is_refused(tmp_path, value):
+    """A dtype the writer cannot encode is refused rather than written wrongly."""
     with pytest.raises(TypeError, match="Cannot write HDF5 data of dtype"):
         hdf5.write(Group({"x": Dataset(value)}), tmp_path / "bad.h5", backend="builtin")
 
 
 def test_the_h5py_backend_without_h5py_names_the_extra(monkeypatch, tmp_path):
+    """Asking for h5py explicitly without it installed says how to install it."""
     real_import = importlib.import_module
 
     def missing(name, *args, **kwargs):
@@ -214,6 +221,7 @@ def test_the_h5py_backend_without_h5py_names_the_extra(monkeypatch, tmp_path):
 
 
 def test_a_written_file_is_byte_for_byte_reproducible(tmp_path):
+    """The same tree writes the same bytes, so a file hash means the content."""
     hdf5.write(_tree(), tmp_path / "a.h5", backend="builtin")
     hdf5.write(_tree(), tmp_path / "b.h5", backend="builtin")
 
@@ -230,7 +238,7 @@ def test_every_numeric_dtype_is_made_explicitly_little_endian(order, kind):
     compound = np.dtype([("x", dtype), ("label", "S4"), ("flag", "u1")])
 
     assert _little_endian_dtype(dtype) == np.dtype("<" + kind)
-    assert _little_endian_dtype(dtype).byteorder in ("<", "=") and _little_endian_dtype(dtype).str.startswith("<")
+    assert _little_endian_dtype(dtype).str.startswith("<")
     converted = _little_endian_dtype(compound)
     assert converted.fields["x"][0].str == "<" + kind
     assert converted.fields["label"][0] == np.dtype("S4")
@@ -238,3 +246,24 @@ def test_every_numeric_dtype_is_made_explicitly_little_endian(order, kind):
         compound.fields[name][1] for name in ("x", "label", "flag")
     ]
     assert converted.itemsize == compound.itemsize
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [np.dtype([("inner", [("a", "<f8")])]), np.dtype([("vector", "<f8", (3,))])],
+    ids=["nested compound", "array member"],
+)
+def test_a_compound_member_that_is_not_a_plain_scalar_is_refused(tmp_path, dtype):
+    """Only scalar members of plain dtypes are encoded; anything else is refused, not flattened."""
+    with pytest.raises(TypeError, match="must be a scalar of a plain dtype"):
+        hdf5.write(Group({"rows": Dataset(np.zeros(2, dtype=dtype))}), tmp_path / "bad.h5", backend="builtin")
+
+
+def test_a_non_contiguous_array_is_written_in_order(tmp_path):
+    """A strided view is copied into C order before its bytes are written."""
+    base = np.arange(20.0).reshape(4, 5)
+    view = base[:, ::2]
+    assert not view.flags.c_contiguous
+    hdf5.write(Group({"view": Dataset(view)}), tmp_path / "view.h5", backend="builtin")
+
+    np.testing.assert_array_equal(hdf5.read(tmp_path / "view.h5", backend="builtin").members["view"].data, view)

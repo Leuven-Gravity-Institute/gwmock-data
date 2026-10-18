@@ -169,3 +169,13 @@ def test_without_h5py_the_built_in_backend_round_trips(monkeypatch, tmp_path, ba
         assert back[key].sample_rate == pytest.approx(series.sample_rate, rel=1e-15)
         assert back[key].name == series.name
         assert back[key].unit == series.unit
+
+
+def test_a_group_where_a_series_should_be_is_refused(tmp_path):
+    """A file with a group among its members is not one ``write_hdf5`` wrote."""
+    from gwmock_data import hdf5
+
+    hdf5.write(hdf5.Group({"H1": hdf5.Group()}), tmp_path / "odd.h5")
+
+    with pytest.raises(TypeError, match="is a group"):
+        read_hdf5(tmp_path / "odd.h5")

@@ -31,6 +31,9 @@ _ENTRY_SIZE = 40
 #: Group internal node K. Every group's B-tree is one leaf, so only the space it reserves matters.
 _INTERNAL_K = 16
 
+#: Bytes in a double-precision float.
+_FLOAT64_SIZE = 8
+
 # Object header message types.
 _DATASPACE, _DATATYPE, _FILL_VALUE, _LAYOUT, _ATTRIBUTE, _SYMBOL_TABLE = 0x01, 0x03, 0x05, 0x08, 0x0C, 0x11
 
@@ -59,7 +62,7 @@ def datatype_message(dtype: np.dtype) -> bytes:
         header = struct.pack("<B3BI", 0x10 | 0, bits, 0, 0, dtype.itemsize)
         return header + struct.pack("<HH", 0, 8 * dtype.itemsize)
     if dtype.kind == "f" and dtype.itemsize in (4, 8):
-        if dtype.itemsize == 8:
+        if dtype.itemsize == _FLOAT64_SIZE:
             sign, exponent_location, exponent_size, mantissa_size, bias = 63, 52, 11, 52, 1023
         else:
             sign, exponent_location, exponent_size, mantissa_size, bias = 31, 23, 8, 23, 127
@@ -148,8 +151,8 @@ def object_header(messages: list[tuple[int, bytes]]) -> bytes:
     """Encode a version 1 object header holding ``messages`` (specification IV.A.1.a)."""
     body = b""
     for message_type, data in messages:
-        data = _pad8(data)
-        body += struct.pack("<HHB3x", message_type, len(data), 0) + data
+        padded = _pad8(data)
+        body += struct.pack("<HHB3x", message_type, len(padded), 0) + padded
     # Version, reserved, message count, reference count, header size; then padding to eight-byte alignment.
     return struct.pack("<BBHII4x", 1, 0, len(messages), 1, len(body)) + body
 

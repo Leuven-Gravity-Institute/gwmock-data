@@ -56,13 +56,13 @@ def read_hdf5(path: str | Path) -> dict[str, TimeSeries]:
         Mapping of dataset name to :class:`~gwmock_data.timeseries.TimeSeries`, in file order.
 
     Raises:
-        ValueError: If a member is a group, or a dataset lacks the ``x0`` or ``dx`` attribute, or its time unit is
-            not seconds.
+        TypeError: If a member is a group rather than a dataset.
+        ValueError: If a dataset lacks the ``x0`` or ``dx`` attribute, or its time unit is not seconds.
     """
     result = {}
     for key, dataset in hdf5.read(Path(path)).members.items():
         if isinstance(dataset, hdf5.Group):
-            raise ValueError(f"{key!r} is a group, not a time series dataset.")
+            raise TypeError(f"{key!r} is a group, not a time series dataset.")
         attrs = dataset.attrs
         if "x0" not in attrs or "dx" not in attrs:
             raise ValueError(f"dataset {key!r} has no x0 and dx attributes, so it is not a time series.")
