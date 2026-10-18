@@ -63,7 +63,14 @@ to accept either kind.
 
 `gwmock_data.io.write_hdf5` and `read_hdf5` write and read a mapping of series
 as HDF5 in the layout GWpy's `TimeSeriesDict` uses, so either side can read what
-the other wrote. They need only `h5py` (the `[hdf5]` extra), not GWpy.
+the other wrote. They need neither h5py nor GWpy: without h5py, files are
+written by gwmock-data's own HDF5 writer and read with pyfive, a pure-Python
+HDF5 reader, so HDF5 works on Python 3.15 too. With h5py installed (the `[hdf5]`
+extra) it is used instead, and compresses the datasets as GWpy does.
+
+[`gwmock_data.hdf5`](../api/hdf5.md) is the layer underneath, for any HDF5 file:
+`write(Group(...), path)` and `read(path)` work on a tree of groups and datasets
+with attributes.
 
 ```python
 from gwmock_data.io import read_hdf5, write_hdf5

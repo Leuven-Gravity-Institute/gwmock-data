@@ -52,6 +52,7 @@ nav = [
     { "Time series" = "api/timeseries.md" },
     { "Sampling grid" = "api/sampling_grid.md" },
     { "Input and output" = "api/io.md" },
+    { "HDF5" = "api/hdf5.md" },
   ] },
   { "Contributing" = "contributing.md" },
   { "Security" = "security.md" },

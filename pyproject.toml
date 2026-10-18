@@ -18,10 +18,14 @@ classifiers = [
 ]
 requires-python = ">=3.13"
 dynamic = ["version"]
-dependencies = ["numpy>=2.2"]
+dependencies = [
+  "numpy>=2.2",
+  # Pure-Python HDF5 reader: HDF5 input without h5py, which has no wheel for the newest Python yet.
+  "pyfive>=1.2.1", # 1.2.0 imports fsspec without declaring it
+]
 
 [project.optional-dependencies]
-# HDF5 input and output (gwmock_data.io).
+# HDF5 through h5py rather than the built-in writer and pyfive: faster, and gzip-compressed datasets.
 hdf5 = ["h5py>=3.12"]
 # Conversion to and from GWpy series.
 gwpy = ["gwpy>=4.0.0"]
