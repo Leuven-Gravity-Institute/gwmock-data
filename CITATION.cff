@@ -1,7 +1,6 @@
 cff-version: 1.2.0
-title:
-    'python-package-template: A GitHub template repository for a Python package'
-license: 'BSD'
+title: 'gwmock-data: Shared data structures for the gwmock packages'
+license: 'BSD-3-Clause'
 type: software
 authors:
     - given-names: Isaac C. F.
@@ -10,5 +9,5 @@ authors:
       orcid: 'https://orcid.org/0000-0003-2166-0027'
 keywords:
     - python
-    - github
-    - template
+    - gravitational waves
+    - time series
