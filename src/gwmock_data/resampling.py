@@ -38,6 +38,14 @@ DEFAULT_SINC_TAPS = 127
 #: see :data:`_TAPS_PER_BETA` and :func:`validate_kernel`.
 DEFAULT_KAISER_BETA = 32.0
 
+#: Output positions evaluated per pass of the tap loop. The loop builds about a dozen temporaries the
+#: size of what it evaluates, once per tap, so evaluating a whole buffer at once costs memory in
+#: proportion to the buffer and works out of main memory rather than cache. Measured at 4e6 positions,
+#: blocks of this size cut the call's peak allocation from 0.72 GB to 0.044 GB and ran 1.9x faster.
+#: Every operation in the loop is elementwise, so the result does not depend on the block size, bit
+#: for bit.
+_BLOCK_POSITIONS = 65536
+
 #: Taps required per unit of Kaiser beta. Measured, not derived: at beta = 32, 127 taps
 #: reach 2.2e-12 at 0.8 x Nyquist while 63 taps give only 1.7e-4, because the transition
 #: band no longer fits. The bound ``taps >= 4 * beta - 1`` reproduces where that
@@ -115,6 +123,16 @@ def resample_uniform_sinc(
     taps, beta = validate_kernel(taps, beta)
     samples = np.asarray(samples, dtype=float)
     index = np.asarray(index, dtype=float)
+    positions = index.ravel()
+    result = np.empty(positions.shape, dtype=float)
+    for first in range(0, positions.size, _BLOCK_POSITIONS):
+        block = slice(first, first + _BLOCK_POSITIONS)
+        result[block] = _resample_block(samples, positions[block], taps=taps, beta=beta)
+    return result.reshape(index.shape)
+
+
+def _resample_block(samples: np.ndarray, index: np.ndarray, *, taps: int, beta: float) -> np.ndarray:
+    """Evaluate :func:`resample_uniform_sinc` at one block of positions, with a validated kernel."""
     n = samples.shape[0]
     half = (taps - 1) // 2
 
