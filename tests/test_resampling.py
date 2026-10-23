@@ -222,8 +222,10 @@ def test_result_does_not_depend_on_the_block_size(monkeypatch: pytest.MonkeyPatc
     """Blocks are an evaluation order, not an approximation: any block size gives the same bits.
 
     The positions mix in-range fractional, integer and out-of-range values and are 2-D, so the
-    zero fill, the exact-sample path and the reshape are all split across block boundaries, and
-    1000 does not divide their count, so the last block is short.
+    zero fill, the exact-sample path and the reshape are all split across block boundaries. Block
+    sizes 7 and 64 do not divide the 3000 positions, so their last block is short, and block size 1
+    runs every position through the scalar loops. The comparison is of the bit patterns, so a
+    changed last bit or sign of zero fails it.
     """
     rng = np.random.default_rng(7)
     samples = rng.standard_normal(500)
@@ -234,15 +236,16 @@ def test_result_does_not_depend_on_the_block_size(monkeypatch: pytest.MonkeyPatc
     blocked = resample_uniform_sinc(samples, index)
 
     assert blocked.shape == index.shape
-    assert np.array_equal(blocked, whole)
+    assert np.array_equal(blocked.view(np.uint64), whole.view(np.uint64))
 
 
 def test_memory_does_not_grow_with_the_number_of_positions() -> None:
     """Peak allocation stays near the output's own size, not a multiple of it per tap.
 
     Evaluated over the whole input at once, the tap loop held about 180 bytes of temporaries per
-    position. The bound here is the output and
-    the index (16 bytes per position) plus a fixed allowance for one block's temporaries.
+    position. Only the output has to grow with the input: the index is built before tracing starts,
+    and flattening a contiguous index is a view. The bound is therefore the output (8 bytes per
+    position) plus a fixed allowance for one block's temporaries, about 12 MB at the default size.
     """
     n = 1_000_000
     samples = np.random.default_rng(3).standard_normal(n + 200)
@@ -255,4 +258,4 @@ def test_memory_does_not_grow_with_the_number_of_positions() -> None:
     finally:
         tracemalloc.stop()
 
-    assert peak < 16 * n + 64 * 2**20
+    assert peak < 8 * n + 32 * 2**20
