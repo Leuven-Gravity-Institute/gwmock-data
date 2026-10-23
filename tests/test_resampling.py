@@ -17,11 +17,13 @@ different things. Boundary behaviour is covered in ``test_jax_projection.py``.
 
 from __future__ import annotations
 
+import tracemalloc
 from itertools import pairwise
 
 import numpy as np
 import pytest
 
+from gwmock_data import resampling
 from gwmock_data.resampling import (
     DEFAULT_KAISER_BETA,
     DEFAULT_SINC_TAPS,
@@ -213,3 +215,47 @@ def test_defaults_are_self_consistent() -> None:
         DEFAULT_SINC_TAPS,
         DEFAULT_KAISER_BETA,
     )
+
+
+@pytest.mark.parametrize("block", [1, 7, 64, 1000])
+def test_result_does_not_depend_on_the_block_size(monkeypatch: pytest.MonkeyPatch, block: int) -> None:
+    """Blocks are an evaluation order, not an approximation: any block size gives the same bits.
+
+    The positions mix in-range fractional, integer and out-of-range values and are 2-D, so the
+    zero fill, the exact-sample path and the reshape are all split across block boundaries. Block
+    sizes 7 and 64 do not divide the 3000 positions, so their last block is short, and block size 1
+    runs every position through the scalar loops. The comparison is of the bit patterns, so a
+    changed last bit or sign of zero fails it.
+    """
+    rng = np.random.default_rng(7)
+    samples = rng.standard_normal(500)
+    index = np.concatenate([rng.uniform(-20.0, 520.0, 2990), np.arange(10, dtype=float)]).reshape(100, 30)
+
+    whole = resample_uniform_sinc(samples, index)
+    monkeypatch.setattr(resampling, "_BLOCK_POSITIONS", block)
+    blocked = resample_uniform_sinc(samples, index)
+
+    assert blocked.shape == index.shape
+    assert np.array_equal(blocked.view(np.uint64), whole.view(np.uint64))
+
+
+def test_memory_does_not_grow_with_the_number_of_positions() -> None:
+    """Peak allocation stays near the output's own size, not a multiple of it per tap.
+
+    Evaluated over the whole input at once, the tap loop held about 180 bytes of temporaries per
+    position. Only the output has to grow with the input: the index is built before tracing starts,
+    and flattening a contiguous index is a view. The bound is therefore the output (8 bytes per
+    position) plus a fixed allowance for one block's temporaries, about 12 MB at the default size.
+    """
+    n = 1_000_000
+    samples = np.random.default_rng(3).standard_normal(n + 200)
+    index = 100.0 + np.arange(n) - 0.37
+
+    tracemalloc.start()
+    try:
+        resample_uniform_sinc(samples, index)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 8 * n + 32 * 2**20
