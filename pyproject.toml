@@ -45,7 +45,7 @@ dev = [
   # A frame library (lalframe) for the GWF tests; lalsuite publishes no wheel for Python 3.15, or for
   # Windows at all, where those tests skip.
   "lalsuite>=7.26.16; python_version < '3.15' and sys_platform != 'win32'",
-  "jax>=0.12.0",
+  "jax>=0.12.0.1",
   "ruff>=0.17.1",
   "prek>=0.5.7",
   "pytest-github-actions-annotate-failures>=0.4.2",
