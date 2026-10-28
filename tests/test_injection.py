@@ -771,7 +771,15 @@ class TestInjectInterpolationQuality:
 
         covered = np.arange(1001, 3048)
         positions = covered - shift
-        np.testing.assert_allclose(result[covered], resample_uniform_sinc(values, positions), rtol=0.0, atol=1e-15)
+        # The offset as `inject` measures it, passed to the kernel as whole samples plus one fraction.
+        offset = (other.t0 - timeseries.t0) / (1.0 / sampling_frequency)
+        whole = np.floor(offset).astype(int)
+        np.testing.assert_allclose(
+            result[covered],
+            resample_uniform_sinc(values, covered - whole, fraction=whole - offset),
+            rtol=0.0,
+            atol=1e-15,
+        )
         interior = (positions > 200) & (positions < length - 200)
         analytic = (0.5 - 0.5 * np.cos(2 * np.pi * positions / (length - 1))) * np.sin(
             2 * np.pi * frequency * positions / sampling_frequency
@@ -1176,3 +1184,20 @@ class TestRefusalsAndEmptyInputs:
         result = inject(target, _series(np.ones(1), t0=0.125, sample_rate=4.0))
 
         assert result is target
+
+
+def test_a_long_chunk_off_the_grid_keeps_its_fraction_to_its_last_sample():
+    """A long chunk off the target's grid is placed with its fraction intact at its far end.
+
+    The chunk has 2**20 samples and starts 0.1234... of a sample after the target's grid. Its positions
+    on the target run to a million; summed in float64 with the fraction they resolve it only to about
+    1e-10 of a sample there, which costs a quarter-rate tone about that much of its amplitude.
+    """
+    n = 1 << 20
+    offset = 0.123456789012345
+    values = np.tile(np.cos(0.5 * np.pi * np.arange(4) + 0.3), n // 4)
+    target = _series(np.zeros(n + 8), t0=0.0, sample_rate=1.0)
+    result = np.asarray(inject(target, _series(values, t0=offset, sample_rate=1.0)).data)
+    k = np.arange(n - 2000, n - 200)  # the far end, inside the kernel's reach of the chunk
+    want = np.cos(0.5 * np.pi * (k % 4) - 0.5 * np.pi * offset + 0.3)
+    assert np.max(np.abs(result[k] - want)) < 1e-11

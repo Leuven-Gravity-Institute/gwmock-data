@@ -99,6 +99,7 @@ def resample_uniform_sinc(
     samples: np.ndarray,
     index: np.ndarray,
     *,
+    fraction: np.ndarray | float | None = None,
     taps: int = DEFAULT_SINC_TAPS,
     beta: float = DEFAULT_KAISER_BETA,
 ) -> np.ndarray:
@@ -111,34 +112,61 @@ def resample_uniform_sinc(
     Weights are normalised to sum to one, which enforces unit gain at DC and removes
     the amplitude bias the window would otherwise introduce near the ends of the series.
 
+    A position given as one float64 keeps about 16 significant digits, so its fractional part is
+    resolved only to ``index * 2.2e-16`` of a sample: about 1e-9 of a sample at ten million samples,
+    which the kernel turns into an error of that much time times the signal's slope. A caller whose
+    positions are a large whole number plus a small offset should pass them as such: ``index`` the
+    integer part and ``fraction`` the offset. The two are never added in floating point, so the
+    offset keeps its own precision whatever the size of ``index``.
+
     Args:
         samples: Uniformly sampled series, shape ``(n,)``.
-        index: Fractional sample positions to evaluate at, any shape.
+        index: Sample positions to evaluate at, any shape: fractional, or, with ``fraction``, whole
+            numbers (an integer array).
+        fraction: Offset added to each position of ``index``, in samples; a scalar or an array
+            broadcastable to ``index``. Any size, though its precision is that of its own magnitude.
         taps: Number of kernel taps.
         beta: Kaiser window shape parameter.
 
     Returns:
         Interpolated values, the shape of ``index``.
+
+    Raises:
+        TypeError: If ``fraction`` is given and ``index`` is not an integer array.
     """
     taps, beta = validate_kernel(taps, beta)
     samples = np.asarray(samples, dtype=float)
-    index = np.asarray(index, dtype=float)
-    positions = index.ravel()
-    result = np.empty(positions.shape, dtype=float)
-    for first in range(0, positions.size, _BLOCK_POSITIONS):
+    if fraction is None:
+        positions = np.asarray(index, dtype=float)
+        whole = np.floor(positions)
+        part = positions - whole
+        whole = whole.astype(np.int64)
+    else:
+        whole = np.asarray(index)
+        if not np.issubdtype(whole.dtype, np.integer):
+            raise TypeError(f"index must be an integer array when fraction is given, not {whole.dtype}")
+        offset = np.broadcast_to(np.asarray(fraction, dtype=float), whole.shape)
+        carried = np.floor(offset)
+        whole = whole.astype(np.int64) + carried.astype(np.int64)
+        part = offset - carried
+    shape = whole.shape
+    whole, part = whole.ravel(), part.ravel()
+    result = np.empty(whole.shape, dtype=float)
+    for first in range(0, whole.size, _BLOCK_POSITIONS):
         block = slice(first, first + _BLOCK_POSITIONS)
-        result[block] = _resample_block(samples, positions[block], taps=taps, beta=beta)
-    return result.reshape(index.shape)
+        result[block] = _resample_block(samples, whole[block], part[block], taps=taps, beta=beta)
+    return result.reshape(shape)
 
 
-def _resample_block(samples: np.ndarray, index: np.ndarray, *, taps: int, beta: float) -> np.ndarray:
-    """Evaluate :func:`resample_uniform_sinc` at one block of positions, with a validated kernel."""
+def _resample_block(
+    samples: np.ndarray, base_int: np.ndarray, frac: np.ndarray, *, taps: int, beta: float
+) -> np.ndarray:
+    """Evaluate :func:`resample_uniform_sinc` at one block of positions.
+
+    Each position is the whole sample ``base_int`` plus ``frac`` in ``[0, 1)``; the kernel is validated.
+    """
     n = samples.shape[0]
     half = (taps - 1) // 2
-
-    base = np.floor(index)
-    frac = index - base
-    base_int = base.astype(np.int64)
 
     # One sine for the whole tap loop. Every tap argument is `x = frac - offset` for an integer
     # offset, and `sin(pi*(frac - offset)) = (-1)**offset * sin(pi*frac)` is an identity in the
@@ -158,8 +186,8 @@ def _resample_block(samples: np.ndarray, index: np.ndarray, *, taps: int, beta: 
     nearest = np.round(frac)
     hoisted_sine = np.where(nearest == 0.0, 1.0, -1.0) * np.sin(np.pi * (frac - nearest))
 
-    total = np.zeros(index.shape, dtype=float)
-    weight_sum = np.zeros(index.shape, dtype=float)
+    total = np.zeros(frac.shape, dtype=float)
+    weight_sum = np.zeros(frac.shape, dtype=float)
     # Kaiser window evaluated on the kernel's own support, so the taper is a property
     # of the kernel rather than of where in the series it happens to land.
     denominator = half + 1.0
@@ -177,7 +205,8 @@ def _resample_block(samples: np.ndarray, index: np.ndarray, *, taps: int, beta: 
         weight_sum += weight
 
     interpolated = np.where(weight_sum != 0.0, total / weight_sum, 0.0)
-    in_range = (index >= 0.0) & (index <= n - 1)
+    # The position is inside [0, n - 1] when its whole part is, and the last sample is reached only exactly.
+    in_range = (base_int >= 0) & ((base_int < n - 1) | ((base_int == n - 1) & (frac == 0.0)))
     return np.where(in_range, interpolated, 0.0)
 
 

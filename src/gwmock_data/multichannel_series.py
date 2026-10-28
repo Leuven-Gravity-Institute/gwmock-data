@@ -323,13 +323,17 @@ class MultichannelTimeSeries:
             # where resampling the whole chunk leaves none. The tail returned below is then already
             # on the lattice, so a contiguous next segment places it without resampling it again.
             #
-            # Same kernel, and the same integer-index-minus-one-offset positions, as `inject`.
+            # Same kernel, and the same integer-index-minus-one-offset positions, as `inject`: the indices
+            # and the offset's fraction passed apart, so the fraction keeps its precision at any index.
             if first > last:
                 logger.warning("Chunk spans no sample of the segment grid. No injection performed.")
                 return None
-            positions = np.arange(first, last + 1) - idx
+            whole = math.floor(idx)
+            positions, fraction = np.arange(first, last + 1) - whole, whole - idx
             other = MultichannelTimeSeries(
-                data=np.array([resample_uniform_sinc(other[i].value, positions) for i in range(len(other))]),
+                data=np.array(
+                    [resample_uniform_sinc(other[i].value, positions, fraction=fraction) for i in range(len(other))]
+                ),
                 start_time=Quantity(
                     self.start_time.value + first / self.sampling_frequency.value, unit=self.start_time.unit
                 ),
