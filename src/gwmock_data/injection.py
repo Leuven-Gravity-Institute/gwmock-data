@@ -208,7 +208,9 @@ def inject(timeseries: TimeSeries, other: TimeSeries, interpolate_if_offset: boo
     inside its own sample span, with the band-limited windowed-sinc kernel gwmock-signal projects
     with (``resample_uniform_sinc``), and those are added. Positions come from integer grid indices
     minus one offset rather than from per-sample GPS times, each of which carries float64 rounding
-    of a sizeable fraction of a sample. The whole of *other* is the kernel's input, so samples just
+    of a sizeable fraction of a sample; the indices and the offset's fraction are passed to the
+    kernel apart, never summed in float64, so the fraction is as precise at the end of a long target
+    as at its start. The whole of *other* is the kernel's input, so samples just
     outside *timeseries* still give context at its edges.
 
     Args:
@@ -270,6 +272,10 @@ def inject(timeseries: TimeSeries, other: TimeSeries, interpolate_if_offset: boo
     if first > last:
         logger.debug("No grid point of the target lies within the other's span; returning the target unchanged")
         return timeseries
-    positions = np.arange(first, last + 1) - offset
-    injected_data[first : last + 1] += resample_uniform_sinc(np.asarray(other.data), positions)
+    # The positions are the grid indices less the offset: whole numbers of up to the target's length
+    # plus one fraction, passed apart so the fraction keeps its precision at any index.
+    whole = math.floor(offset)
+    injected_data[first : last + 1] += resample_uniform_sinc(
+        np.asarray(other.data), np.arange(first, last + 1) - whole, fraction=whole - offset
+    )
     return dataclasses.replace(timeseries, data=injected_data)

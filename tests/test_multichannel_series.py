@@ -494,3 +494,21 @@ class TestRefusals:
     def test_equal_series_are_equal(self):
         """Equal series are equal."""
         assert self._series() == self._series()
+
+
+def test_a_long_chunk_off_the_grid_keeps_its_fraction_to_its_last_sample():
+    """A long chunk off the segment's grid is placed with its fraction intact at its far end.
+
+    As ``inject``: a 2**20-sample chunk 0.1234... of a sample off the grid, whose positions run to a
+    million. Passed as whole samples plus one fraction they keep it, where summed in float64 they would
+    lose about 1e-10 of a sample at the far end.
+    """
+    n = 1 << 20
+    offset = 0.123456789012345
+    values = np.tile(np.cos(0.5 * np.pi * np.arange(4) + 0.3), n // 4)
+    segment = MultichannelTimeSeries(data=np.zeros((1, n + 8)), start_time=0.0, sampling_frequency=1.0)
+    chunk = MultichannelTimeSeries(data=values[np.newaxis, :], start_time=offset, sampling_frequency=1.0)
+    segment.inject(chunk)
+    k = np.arange(n - 2000, n - 200)
+    want = np.cos(0.5 * np.pi * (k % 4) - 0.5 * np.pi * offset + 0.3)
+    assert np.max(np.abs(np.asarray(segment[0])[k] - want)) < 1e-11

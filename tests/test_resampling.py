@@ -259,3 +259,83 @@ def test_memory_does_not_grow_with_the_number_of_positions() -> None:
         tracemalloc.stop()
 
     assert peak < 8 * n + 32 * 2**20
+
+
+# --- Positions given as a whole sample plus a fraction ------------------------------------------------
+
+#: A tone at a quarter of the sample rate is 4-periodic in the sample index, so its value at a position
+#: ``k + d`` is known exactly from ``k mod 4`` and ``d``, at any ``k``.
+_QUARTER_PHASE = 0.3
+
+
+def _quarter_tone(whole: np.ndarray, part: np.ndarray) -> np.ndarray:
+    return np.cos(0.5 * np.pi * (whole % 4) + 0.5 * np.pi * part + _QUARTER_PHASE)
+
+
+def test_whole_and_fraction_reproduce_the_float_positions_bit_for_bit_where_those_are_exact() -> None:
+    """Where a float64 position is exact, the same position given apart is evaluated identically."""
+    samples = np.cos(0.37 * np.arange(_N, dtype=float))
+    whole = np.arange(10, _N - 10)
+    for fraction in (0.375, -1.625, 2.0):
+        split = resample_uniform_sinc(samples, whole, fraction=fraction)
+        joined = resample_uniform_sinc(samples, whole + fraction)
+        np.testing.assert_array_equal(split, joined)
+
+
+def test_a_fraction_keeps_its_precision_at_large_indices() -> None:
+    """A position given as a whole sample and a fraction keeps the fraction's precision at any index.
+
+    Near sample 2**23 a float64 position resolves only 1.9e-9 of a sample, which costs a quarter-rate
+    tone up to 1.5e-9 of its amplitude; passed apart, only the kernel's error remains.
+    """
+    n = 1 << 23
+    samples = np.tile(_quarter_tone(np.arange(4), np.zeros(4)), n // 4)
+    whole = np.arange(n - 3000, n - 1000)
+    fraction = 0.123456789012345  # bits far below a sample's resolution at this index
+    want = _quarter_tone(whole, np.full(whole.shape, fraction))
+
+    split = resample_uniform_sinc(samples, whole, fraction=fraction)
+    joined = resample_uniform_sinc(samples, whole + fraction)
+
+    assert np.max(np.abs(split - want)) < 1e-11
+    assert np.max(np.abs(joined - want)) > 1e-10  # what the single float64 position loses here
+
+
+def test_a_fraction_with_a_float_index_is_refused() -> None:
+    """With a fraction, the index must be whole samples: a float index would bring the rounding back."""
+    with pytest.raises(TypeError, match="integer array"):
+        resample_uniform_sinc(np.ones(16), np.arange(16, dtype=float), fraction=0.5)
+
+
+@pytest.mark.parametrize(
+    ("whole", "fraction", "inside"),
+    [(0, -0.25, False), (0, 0.0, True), (15, 0.0, True), (15, 1e-12, False), (17, -2.0, True), (-1, 1.0, True)],
+)
+def test_positions_outside_the_series_are_zero_whichever_way_they_are_given(
+    whole: int, fraction: float, inside: bool
+) -> None:
+    """A position outside ``[0, n - 1]`` gives zero, given apart or as one float, and the two agree."""
+    samples = np.arange(1.0, 17.0)  # n = 16: positions 0 to 15 are inside
+    split = resample_uniform_sinc(samples, np.array([whole]), fraction=fraction)[0]
+    assert (split != 0.0) == inside
+    np.testing.assert_array_equal(split, resample_uniform_sinc(samples, np.array([whole + fraction]))[0])
+
+
+def test_an_index_that_would_wrap_in_int64_is_refused() -> None:
+    """A ``uint64`` index above ``2**63`` would wrap to a position inside the series when cast."""
+    with pytest.raises(TypeError, match="castable to int64"):
+        resample_uniform_sinc(np.ones(16), np.array([2**64 - 1], dtype=np.uint64), fraction=1.0)
+
+
+@pytest.mark.parametrize("fraction", [np.nan, np.inf, -np.inf, 1e300, -1e300, 0.5])
+def test_a_fraction_too_large_or_not_finite_places_nothing(fraction: float) -> None:
+    """A fraction that is not finite, or a position so far out it is outside any series, gives zero.
+
+    Index 3 is inside the series for an ordinary fraction (0.5), so it is checked only for the others;
+    the extreme indices are outside whatever the fraction.
+    """
+    out = resample_uniform_sinc(
+        np.ones(16), np.array([3, np.iinfo(np.int64).max, np.iinfo(np.int64).min]), fraction=fraction
+    )
+    np.testing.assert_array_equal(out[1:], np.zeros(2))
+    assert (out[0] == 0.0) == (fraction != 0.5)

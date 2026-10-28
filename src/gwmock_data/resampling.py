@@ -46,6 +46,10 @@ DEFAULT_KAISER_BETA = 32.0
 #: for bit.
 _BLOCK_POSITIONS = 65536
 
+#: A whole sample or a fraction beyond this many samples from the start is taken as outside any series
+#: (none fits in memory), so whole samples and carried fractions are added only below it and cannot overflow.
+_FAR = 2**61
+
 #: Taps required per unit of Kaiser beta. Measured, not derived: at beta = 32, 127 taps
 #: reach 2.2e-12 at 0.8 x Nyquist while 63 taps give only 1.7e-4, because the transition
 #: band no longer fits. The bound ``taps >= 4 * beta - 1`` reproduces where that
@@ -99,6 +103,7 @@ def resample_uniform_sinc(
     samples: np.ndarray,
     index: np.ndarray,
     *,
+    fraction: np.ndarray | float | None = None,
     taps: int = DEFAULT_SINC_TAPS,
     beta: float = DEFAULT_KAISER_BETA,
 ) -> np.ndarray:
@@ -111,34 +116,69 @@ def resample_uniform_sinc(
     Weights are normalised to sum to one, which enforces unit gain at DC and removes
     the amplitude bias the window would otherwise introduce near the ends of the series.
 
+    A position given as one float64 keeps about 16 significant digits, so its fractional part is
+    resolved only to ``index * 2.2e-16`` of a sample: about 1e-9 of a sample at ten million samples,
+    which the kernel turns into an error of that much time times the signal's slope. A caller whose
+    positions are a large whole number plus a small offset should pass them as such: ``index`` the
+    integer part and ``fraction`` the offset. The two are never added in floating point, so the
+    offset keeps its own precision whatever the size of ``index``.
+
     Args:
         samples: Uniformly sampled series, shape ``(n,)``.
-        index: Fractional sample positions to evaluate at, any shape.
+        index: Sample positions to evaluate at, any shape: fractional, or, with ``fraction``, whole
+            numbers (an integer array).
+        fraction: Offset added to each position of ``index``, in samples; a scalar or an array
+            broadcastable to ``index``. Any size, though its precision is that of its own magnitude.
         taps: Number of kernel taps.
         beta: Kaiser window shape parameter.
 
     Returns:
         Interpolated values, the shape of ``index``.
+
+    Raises:
+        TypeError: If ``fraction`` is given and ``index`` is not an integer array castable to ``int64``
+            (``uint64`` is not: its values above ``2**63`` would wrap).
     """
     taps, beta = validate_kernel(taps, beta)
     samples = np.asarray(samples, dtype=float)
-    index = np.asarray(index, dtype=float)
-    positions = index.ravel()
-    result = np.empty(positions.shape, dtype=float)
-    for first in range(0, positions.size, _BLOCK_POSITIONS):
+    if fraction is None:
+        positions = np.asarray(index, dtype=float)
+        whole = np.floor(positions)
+        part = positions - whole
+        whole = whole.astype(np.int64)
+    else:
+        whole = np.asarray(index)
+        if not np.issubdtype(whole.dtype, np.integer) or not np.can_cast(whole.dtype, np.int64):
+            raise TypeError(
+                f"index must be an integer array castable to int64 when fraction is given, not {whole.dtype}"
+            )
+        offset = np.broadcast_to(np.asarray(fraction, dtype=float), whole.shape)
+        whole = whole.astype(np.int64)
+        carried = np.floor(np.where(np.isfinite(offset), offset, 0.0))
+        # A whole sample or a carried fraction this far out puts the position outside any series, and so
+        # does a non-finite fraction (as a non-finite float position): such a position places nothing.
+        # Excluding them first means the sum below cannot overflow.
+        far = ~np.isfinite(offset) | (whole > _FAR) | (whole < -_FAR) | (np.abs(carried) > _FAR)
+        whole = np.where(far, -1, whole + np.where(far, 0.0, carried).astype(np.int64))
+        part = np.where(far, 0.0, offset - carried)
+    shape = whole.shape
+    whole, part = whole.ravel(), part.ravel()
+    result = np.empty(whole.shape, dtype=float)
+    for first in range(0, whole.size, _BLOCK_POSITIONS):
         block = slice(first, first + _BLOCK_POSITIONS)
-        result[block] = _resample_block(samples, positions[block], taps=taps, beta=beta)
-    return result.reshape(index.shape)
+        result[block] = _resample_block(samples, whole[block], part[block], taps=taps, beta=beta)
+    return result.reshape(shape)
 
 
-def _resample_block(samples: np.ndarray, index: np.ndarray, *, taps: int, beta: float) -> np.ndarray:
-    """Evaluate :func:`resample_uniform_sinc` at one block of positions, with a validated kernel."""
+def _resample_block(
+    samples: np.ndarray, base_int: np.ndarray, frac: np.ndarray, *, taps: int, beta: float
+) -> np.ndarray:
+    """Evaluate :func:`resample_uniform_sinc` at one block of positions.
+
+    Each position is the whole sample ``base_int`` plus ``frac`` in ``[0, 1)``; the kernel is validated.
+    """
     n = samples.shape[0]
     half = (taps - 1) // 2
-
-    base = np.floor(index)
-    frac = index - base
-    base_int = base.astype(np.int64)
 
     # One sine for the whole tap loop. Every tap argument is `x = frac - offset` for an integer
     # offset, and `sin(pi*(frac - offset)) = (-1)**offset * sin(pi*frac)` is an identity in the
@@ -158,8 +198,8 @@ def _resample_block(samples: np.ndarray, index: np.ndarray, *, taps: int, beta: 
     nearest = np.round(frac)
     hoisted_sine = np.where(nearest == 0.0, 1.0, -1.0) * np.sin(np.pi * (frac - nearest))
 
-    total = np.zeros(index.shape, dtype=float)
-    weight_sum = np.zeros(index.shape, dtype=float)
+    total = np.zeros(frac.shape, dtype=float)
+    weight_sum = np.zeros(frac.shape, dtype=float)
     # Kaiser window evaluated on the kernel's own support, so the taper is a property
     # of the kernel rather than of where in the series it happens to land.
     denominator = half + 1.0
@@ -177,7 +217,8 @@ def _resample_block(samples: np.ndarray, index: np.ndarray, *, taps: int, beta: 
         weight_sum += weight
 
     interpolated = np.where(weight_sum != 0.0, total / weight_sum, 0.0)
-    in_range = (index >= 0.0) & (index <= n - 1)
+    # The position is inside [0, n - 1] when its whole part is, and the last sample is reached only exactly.
+    in_range = (base_int >= 0) & ((base_int < n - 1) | ((base_int == n - 1) & (frac == 0.0)))
     return np.where(in_range, interpolated, 0.0)
 
 
