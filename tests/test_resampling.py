@@ -319,3 +319,23 @@ def test_positions_outside_the_series_are_zero_whichever_way_they_are_given(
     split = resample_uniform_sinc(samples, np.array([whole]), fraction=fraction)[0]
     assert (split != 0.0) == inside
     np.testing.assert_array_equal(split, resample_uniform_sinc(samples, np.array([whole + fraction]))[0])
+
+
+def test_an_index_that_would_wrap_in_int64_is_refused() -> None:
+    """A ``uint64`` index above ``2**63`` would wrap to a position inside the series when cast."""
+    with pytest.raises(TypeError, match="castable to int64"):
+        resample_uniform_sinc(np.ones(16), np.array([2**64 - 1], dtype=np.uint64), fraction=1.0)
+
+
+@pytest.mark.parametrize("fraction", [np.nan, np.inf, -np.inf, 1e300, -1e300, 0.5])
+def test_a_fraction_too_large_or_not_finite_places_nothing(fraction: float) -> None:
+    """A fraction that is not finite, or a position so far out it is outside any series, gives zero.
+
+    Index 3 is inside the series for an ordinary fraction (0.5), so it is checked only for the others;
+    the extreme indices are outside whatever the fraction.
+    """
+    out = resample_uniform_sinc(
+        np.ones(16), np.array([3, np.iinfo(np.int64).max, np.iinfo(np.int64).min]), fraction=fraction
+    )
+    np.testing.assert_array_equal(out[1:], np.zeros(2))
+    assert (out[0] == 0.0) == (fraction != 0.5)

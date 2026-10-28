@@ -46,6 +46,10 @@ DEFAULT_KAISER_BETA = 32.0
 #: for bit.
 _BLOCK_POSITIONS = 65536
 
+#: A whole sample or a fraction beyond this many samples from the start is taken as outside any series
+#: (none fits in memory), so whole samples and carried fractions are added only below it and cannot overflow.
+_FAR = 2**61
+
 #: Taps required per unit of Kaiser beta. Measured, not derived: at beta = 32, 127 taps
 #: reach 2.2e-12 at 0.8 x Nyquist while 63 taps give only 1.7e-4, because the transition
 #: band no longer fits. The bound ``taps >= 4 * beta - 1`` reproduces where that
@@ -132,7 +136,8 @@ def resample_uniform_sinc(
         Interpolated values, the shape of ``index``.
 
     Raises:
-        TypeError: If ``fraction`` is given and ``index`` is not an integer array.
+        TypeError: If ``fraction`` is given and ``index`` is not an integer array castable to ``int64``
+            (``uint64`` is not: its values above ``2**63`` would wrap).
     """
     taps, beta = validate_kernel(taps, beta)
     samples = np.asarray(samples, dtype=float)
@@ -143,12 +148,19 @@ def resample_uniform_sinc(
         whole = whole.astype(np.int64)
     else:
         whole = np.asarray(index)
-        if not np.issubdtype(whole.dtype, np.integer):
-            raise TypeError(f"index must be an integer array when fraction is given, not {whole.dtype}")
+        if not np.issubdtype(whole.dtype, np.integer) or not np.can_cast(whole.dtype, np.int64):
+            raise TypeError(
+                f"index must be an integer array castable to int64 when fraction is given, not {whole.dtype}"
+            )
         offset = np.broadcast_to(np.asarray(fraction, dtype=float), whole.shape)
-        carried = np.floor(offset)
-        whole = whole.astype(np.int64) + carried.astype(np.int64)
-        part = offset - carried
+        whole = whole.astype(np.int64)
+        carried = np.floor(np.where(np.isfinite(offset), offset, 0.0))
+        # A whole sample or a carried fraction this far out puts the position outside any series, and so
+        # does a non-finite fraction (as a non-finite float position): such a position places nothing.
+        # Excluding them first means the sum below cannot overflow.
+        far = ~np.isfinite(offset) | (whole > _FAR) | (whole < -_FAR) | (np.abs(carried) > _FAR)
+        whole = np.where(far, -1, whole + np.where(far, 0.0, carried).astype(np.int64))
+        part = np.where(far, 0.0, offset - carried)
     shape = whole.shape
     whole, part = whole.ravel(), part.ravel()
     result = np.empty(whole.shape, dtype=float)
