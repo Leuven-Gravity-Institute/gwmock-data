@@ -296,6 +296,40 @@ class TestTaperedChunks:
         assert TAPERED_METADATA_KEY not in tail.metadata
 
 
+class TestCroppingDropsTheTaperedMark:
+    """A cropped piece of a marked signal is cut, so it must not reach the exact, global oversampling."""
+
+    def _marked(self):
+        chunk = MultichannelTimeSeries(data=np.ones((2, 64)), start_time=1e9, sampling_frequency=64.0)
+        chunk.metadata[TAPERED_METADATA_KEY] = True
+        return chunk
+
+    def test_a_crop_that_removes_samples_drops_the_mark(self):
+        """Marked whole, cropped to a part: unmarked."""
+        chunk = self._marked().crop(start_time=1e9 + 0.25)
+        assert TAPERED_METADATA_KEY not in chunk.metadata
+
+    def test_a_crop_that_removes_nothing_keeps_it(self):
+        """Cropping to the whole span leaves the signal whole."""
+        chunk = self._marked().crop(start_time=1e9, end_time=1e9 + 1.0)
+        assert chunk.metadata[TAPERED_METADATA_KEY] is True
+
+    def test_a_cropped_marked_chunk_is_resampled_by_the_kernel_alone(self):
+        """Marked whole, cropped, then injected off the grid: the kernel's result, not the oversampled one."""
+        k = np.arange(4096, dtype=float)
+        values = np.cos(0.98 * np.pi * k)
+        chunk = MultichannelTimeSeries(
+            data=values[np.newaxis, :], start_time=1e9 + 0.375 / 4096, sampling_frequency=4096.0
+        )
+        chunk.metadata[TAPERED_METADATA_KEY] = True
+        chunk.crop(start_time=1e9 + (1024 + 0.375) / 4096)
+        segment = MultichannelTimeSeries(data=np.zeros((1, 4096)), start_time=1e9, sampling_frequency=4096.0)
+        segment.inject(chunk)
+        cut = values[1024:]
+        covered = np.arange(1025, 4096)
+        np.testing.assert_array_equal(np.asarray(segment[0])[covered], resample_uniform_sinc(cut, covered - 1024.375))
+
+
 class TestTheOffGridWarningDescribesTheResampling:
     """The warning an off-grid chunk raises must name what is actually done to it.
 

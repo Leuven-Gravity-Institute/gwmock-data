@@ -23,8 +23,9 @@ logger = logging.getLogger("gwmock_data")
 #: ends, such as a generated compact-binary waveform. An off-grid chunk so marked is oversampled exactly
 #: before it is resampled, and is placed accurately up to its Nyquist frequency rather than to 0.8 of it.
 #: Only the producer can know this: a chunk cut from a longer signal also ends in zeros once it is padded,
-#: but rings from its cut ends across its whole length if it is interpolated globally. A returned tail is a
-#: cut piece, so the mark is not carried onto it.
+#: but rings from its cut ends across its whole length if it is interpolated globally. Cropping that removes
+#: samples drops the mark (see :meth:`MultichannelTimeSeries.crop`), and so a returned tail, cropped from its
+#: chunk, is unmarked.
 TAPERED_METADATA_KEY = "tapered"
 
 
@@ -225,12 +226,18 @@ class MultichannelTimeSeries:
             end_time: End time of the cropped segment in GPS seconds. If None, use the
                 original end time.
 
+        A crop that removes samples leaves a piece cut from the series, so it also removes the
+        :data:`TAPERED_METADATA_KEY` mark: the piece no longer falls smoothly to zero at its ends.
+
         Returns:
             This MultichannelTimeSeries, cropped.
         """
         start = None if start_time is None else _in_unit(start_time, "s")
         end = None if end_time is None else _in_unit(end_time, "s")
+        before = [series.n_samples for series in self._data]
         self._data = [series.crop(start, end).copy() for series in self._data]
+        if [series.n_samples for series in self._data] != before:
+            self.metadata.pop(TAPERED_METADATA_KEY, None)
         return self
 
     def inject(
@@ -383,8 +390,6 @@ class MultichannelTimeSeries:
             # `injection_parameters` -- and the channel name and unit -- from any injection long
             # enough to cross a boundary, which is precisely the long-inspiral case.
             tail.metadata.update(dict(supplied.metadata))
-            # A tail is cut from the chunk, so it is no longer a whole tapered signal.
-            tail.metadata.pop(TAPERED_METADATA_KEY, None)
             for index in range(min(tail.num_of_channels, supplied.num_of_channels)):
                 source = supplied[index]
                 tail._data[index] = dataclasses.replace(tail[index], name=source.name, unit=source.unit)
