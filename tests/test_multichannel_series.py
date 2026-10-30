@@ -10,7 +10,7 @@ import pytest
 from astropy.units import Quantity
 
 from gwmock_data.multichannel_series import MultichannelTimeSeries, MultichannelTimeSeriesList
-from gwmock_data.resampling import resample_uniform_sinc
+from gwmock_data.resampling import OVERSAMPLING_FACTOR, oversample_fourier, resample_uniform_sinc
 
 
 @pytest.fixture
@@ -220,8 +220,13 @@ class TestInjectOffLatticeResampling:
         # 1000.375 samples is 8003 * 2**-15 s, exactly representable beside a GPS epoch of 1e9, so
         # the offset `inject` measures is the nominal one and both checks below can be tight.
         length, shift, frequency = 2048, 1000.375, 0.8 * sampling_frequency / 2
-        envelope = np.hanning(length)
-        values = envelope * np.sin(2 * np.pi * frequency * np.arange(length) / sampling_frequency)
+
+        # Gaussian, not Hann: a Hann-tapered tone is not band-limited, so its samples do not interpolate to it
+        # (2.7e-8 apart at this length); see the matching test in ``test_injection.py``.
+        def envelope(positions):
+            return np.exp(-0.5 * ((positions - length / 2) / (length / 16)) ** 2)
+
+        values = envelope(np.arange(length)) * np.sin(2 * np.pi * frequency * np.arange(length) / sampling_frequency)
         segment = MultichannelTimeSeries(
             data=np.zeros((2, 4096)), start_time=start, sampling_frequency=sampling_frequency
         )
@@ -235,15 +240,42 @@ class TestInjectOffLatticeResampling:
 
         covered = np.arange(1001, 3048)
         positions = covered - shift
-        expected = resample_uniform_sinc(values, positions)
+        expected = resample_uniform_sinc(oversample_fourier(values), OVERSAMPLING_FACTOR * positions)
         interior = (positions > 200) & (positions < length - 200)
-        analytic = (0.5 - 0.5 * np.cos(2 * np.pi * positions / (length - 1))) * np.sin(
-            2 * np.pi * frequency * positions / sampling_frequency
-        )
+        analytic = envelope(positions) * np.sin(2 * np.pi * frequency * positions / sampling_frequency)
         for channel, scale in enumerate((1.0, -2.0)):
             written = np.asarray(segment[channel])
             np.testing.assert_allclose(written[covered], scale * expected, rtol=0.0, atol=1e-15)
             assert np.max(np.abs(written[covered] - scale * analytic)[interior]) < 1e-9
+
+    def test_content_up_against_nyquist_is_placed_accurately(self):
+        """An off-grid chunk at 0.98 x Nyquist lands to roundoff on every channel.
+
+        The kernel alone is off by about a tenth of the signal there; the exact oversampling ahead of it is what
+        makes the difference.
+        """
+        sampling_frequency, start = 4096.0, 1e9
+        length, shift = 8192, 1000.375
+        k = np.arange(length, dtype=float)
+
+        def tone(positions):
+            return np.exp(-0.5 * ((positions - length / 2) / (length / 16)) ** 2) * np.cos(0.98 * np.pi * positions)
+
+        segment = MultichannelTimeSeries(
+            data=np.zeros((2, 10240)), start_time=start, sampling_frequency=sampling_frequency
+        )
+        chunk = MultichannelTimeSeries(
+            data=np.stack([tone(k), -2.0 * tone(k)]),
+            start_time=start + shift / sampling_frequency,
+            sampling_frequency=sampling_frequency,
+        )
+
+        assert segment.inject(chunk) is None
+
+        covered = np.arange(1001, 1000 + length)
+        for channel, scale in enumerate((1.0, -2.0)):
+            written = np.asarray(segment[channel])[covered]
+            assert np.max(np.abs(written - scale * tone(covered - shift))) < 1e-10
 
 
 class TestTheOffGridWarningDescribesTheResampling:
@@ -505,10 +537,18 @@ def test_a_long_chunk_off_the_grid_keeps_its_fraction_to_its_last_sample():
     """
     n = 1 << 20
     offset = 0.123456789012345
-    values = np.tile(np.cos(0.5 * np.pi * np.arange(4) + 0.3), n // 4)
+    # A tone under a Gaussian envelope centred near the far end, where the positions are largest. The chunk is
+    # resampled as the band-limited interpolant of its samples, zero outside them, so an abruptly ending chunk
+    # would ring like one; the envelope is ten widths from either end, below roundoff there. The tone is taken
+    # at `k % 4`, since a phase of 0.5 * pi * k near k = 1e6 is itself rounded by about 2e-10.
+    centre, width = n - 50_000, 5_000.0
+    k_all = np.arange(n)
+    values = np.exp(-0.5 * ((k_all - centre) / width) ** 2) * np.cos(0.5 * np.pi * (k_all % 4) + 0.3)
     segment = MultichannelTimeSeries(data=np.zeros((1, n + 8)), start_time=0.0, sampling_frequency=1.0)
     chunk = MultichannelTimeSeries(data=values[np.newaxis, :], start_time=offset, sampling_frequency=1.0)
     segment.inject(chunk)
-    k = np.arange(n - 2000, n - 200)
-    want = np.cos(0.5 * np.pi * (k % 4) - 0.5 * np.pi * offset + 0.3)
+    k = np.arange(centre - 2000, centre + 2000)
+    want = np.exp(-0.5 * ((k - offset - centre) / width) ** 2) * np.cos(
+        0.5 * np.pi * (k % 4) - 0.5 * np.pi * offset + 0.3
+    )
     assert np.max(np.abs(np.asarray(segment[0])[k] - want)) < 1e-11

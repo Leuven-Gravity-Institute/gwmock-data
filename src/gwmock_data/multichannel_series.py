@@ -13,7 +13,7 @@ import numpy as np
 from astropy.units import Quantity
 
 from gwmock_data.injection import alignment_tolerance, inject, is_aligned, measure_content_before
-from gwmock_data.resampling import resample_uniform_sinc
+from gwmock_data.resampling import OVERSAMPLING_FACTOR, oversample_fourier, resample_uniform_sinc
 from gwmock_data.timeseries import TimeSeries as ChannelSeries
 from gwmock_data.timeseries import as_timeseries
 
@@ -248,7 +248,9 @@ class MultichannelTimeSeries:
         different samples from earlier releases, most visibly at high frequency.
 
         The kernel is :func:`gwmock_data.resampling.resample_uniform_sinc`, the one the gwmock packages share,
-        so an off-grid chunk is resampled here exactly as gwmock-signal resamples when it projects.
+        so an off-grid chunk is resampled here exactly as gwmock-signal resamples when it projects. Each channel
+        is first oversampled exactly (:func:`gwmock_data.resampling.oversample_fourier`), which keeps the
+        kernel accurate up to the chunk's Nyquist frequency rather than to 0.8 of it.
 
         Args:
             other: MultichannelTimeSeries instance to inject.
@@ -321,18 +323,24 @@ class MultichannelTimeSeries:
             # ~half its taps of context on each side, so resampling segment by segment would cut
             # that context at every boundary: measured errors there reached the signal's own peak,
             # where resampling the whole chunk leaves none. The tail returned below is then already
-            # on the lattice, so a contiguous next segment places it without resampling it again.
+            # on the lattice, so a contiguous next segment places it without resampling it again. The exact
+            # oversampling ahead of the kernel reads the whole chunk at once, so it too needs the chunk whole.
             #
-            # Same kernel, and the same integer-index-minus-one-offset positions, as `inject`: the indices
-            # and the offset's fraction passed apart, so the fraction keeps its precision at any index.
+            # Same oversampling, kernel and integer-index-minus-one-offset positions as `inject`: the indices
+            # and the offset's fraction passed apart, so the fraction keeps its precision at any index, and both
+            # scaled by the oversampling factor, exactly.
             if first > last:
                 logger.warning("Chunk spans no sample of the segment grid. No injection performed.")
                 return None
             whole = math.floor(idx)
-            positions, fraction = np.arange(first, last + 1) - whole, whole - idx
+            positions = OVERSAMPLING_FACTOR * (np.arange(first, last + 1) - whole)
+            fraction = OVERSAMPLING_FACTOR * (whole - idx)
             other = MultichannelTimeSeries(
                 data=np.array(
-                    [resample_uniform_sinc(other[i].value, positions, fraction=fraction) for i in range(len(other))]
+                    [
+                        resample_uniform_sinc(oversample_fourier(other[i].value), positions, fraction=fraction)
+                        for i in range(len(other))
+                    ]
                 ),
                 start_time=Quantity(
                     self.start_time.value + first / self.sampling_frequency.value, unit=self.start_time.unit

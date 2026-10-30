@@ -27,6 +27,8 @@ from gwmock_data import resampling
 from gwmock_data.resampling import (
     DEFAULT_KAISER_BETA,
     DEFAULT_SINC_TAPS,
+    OVERSAMPLING_FACTOR,
+    oversample_fourier,
     resample_uniform_sinc,
     validate_kernel,
 )
@@ -339,3 +341,88 @@ def test_a_fraction_too_large_or_not_finite_places_nothing(fraction: float) -> N
     )
     np.testing.assert_array_equal(out[1:], np.zeros(2))
     assert (out[0] == 0.0) == (fraction != 0.5)
+
+
+def _windowed_tone(positions: np.ndarray, frequency_over_nyquist: float, n: int) -> np.ndarray:
+    """A tone under a Gaussian envelope centred on the series, at any (fractional) sample positions.
+
+    The envelope's spectrum is a few hundredths of a percent of Nyquist wide, so the series is band-limited to
+    well within roundoff even with the tone at 0.995 x Nyquist, and its value between samples is known
+    analytically. A bare tone is not band-limited over a finite series, and its band-limited interpolant rings
+    at the ends of the series, so it cannot test accuracy up against Nyquist.
+    """
+    width = n / 16.0
+    return np.exp(-0.5 * ((positions - n / 2.0) / width) ** 2) * np.cos(
+        np.pi * frequency_over_nyquist * positions + 0.3
+    )
+
+
+@pytest.mark.parametrize("frequency_over_nyquist", [0.5, 0.9, 0.98, 0.995])
+def test_the_kernel_reading_an_oversampled_series_is_accurate_up_to_nyquist(frequency_over_nyquist: float) -> None:
+    """Oversampled first, a series resamples to roundoff wherever its content lies below Nyquist.
+
+    The positions are shifted by a delay that varies along the series, as in a projection onto a rotating
+    detector, so this is not a constant shift a phase ramp could do.
+    """
+    n = 8192
+    samples = _windowed_tone(np.arange(n, dtype=float), frequency_over_nyquist, n)
+    positions = np.arange(n, dtype=float) + 0.37 + 3.2 * np.sin(2.0 * np.pi * np.arange(n) / n)
+    want = _windowed_tone(positions, frequency_over_nyquist, n)
+
+    got = resample_uniform_sinc(oversample_fourier(samples), OVERSAMPLING_FACTOR * positions)
+
+    assert np.max(np.abs(got - want)) < 1e-10
+
+
+def test_without_oversampling_the_kernel_fails_near_nyquist() -> None:
+    """The case the oversampling exists for, on the same series: without it the error is of the signal's order."""
+    n = 8192
+    samples = _windowed_tone(np.arange(n, dtype=float), 0.98, n)
+    positions = np.arange(n, dtype=float) + 0.37
+    error = np.max(np.abs(resample_uniform_sinc(samples, positions) - _windowed_tone(positions, 0.98, n)))
+    assert error > 1e-2, error
+
+
+def test_oversampling_keeps_the_samples_including_their_nyquist_component() -> None:
+    """Every sample of the input is a sample of the result.
+
+    White noise carries a component at exactly Nyquist. That component is split between the positive and the
+    negative frequency on the finer grid; counted once on each side without the split, it would come back
+    twice over at the input's own samples.
+    """
+    samples = np.random.default_rng(7).standard_normal(1001)
+    finer = oversample_fourier(samples)
+    assert finer.shape == (OVERSAMPLING_FACTOR * 1000 + 1,)
+    np.testing.assert_allclose(finer[::OVERSAMPLING_FACTOR], samples, rtol=0.0, atol=1e-13)
+
+
+@pytest.mark.parametrize("factor", [3, 4])
+def test_oversampling_by_other_factors_places_input_sample_k_at_factor_times_k(factor: int) -> None:
+    """The grid relation is ``factor * k`` for any factor, and the points between are the interpolant's."""
+    n = 2048
+    samples = _windowed_tone(np.arange(n, dtype=float), 0.7, n)
+    finer = oversample_fourier(samples, factor)
+    assert finer.shape == (factor * (n - 1) + 1,)
+    np.testing.assert_allclose(finer, _windowed_tone(np.arange(finer.size) / factor, 0.7, n), rtol=0.0, atol=1e-12)
+
+
+def test_oversampling_by_one_or_of_nothing_returns_a_copy() -> None:
+    """Factor 1 is the identity, and an empty series stays empty; neither hands back the caller's array."""
+    samples = np.arange(5.0)
+    same = oversample_fourier(samples, 1)
+    np.testing.assert_array_equal(same, samples)
+    assert same is not samples
+    assert oversample_fourier(np.array([])).shape == (0,)
+
+
+@pytest.mark.parametrize("factor", [0, -2, 1.5, 2.0, True])
+def test_oversampling_refuses_a_factor_that_is_not_a_positive_integer(factor: object) -> None:
+    """A float factor is refused even when whole: the result's length depends on it exactly."""
+    with pytest.raises(ValueError, match="factor"):
+        oversample_fourier(np.ones(4), factor)  # type: ignore[arg-type]
+
+
+def test_oversampling_refuses_more_than_one_dimension() -> None:
+    """One channel at a time, like the kernel."""
+    with pytest.raises(ValueError, match="one-dimensional"):
+        oversample_fourier(np.ones((2, 4)))

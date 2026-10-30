@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from gwmock_data.resampling import resample_uniform_sinc
+from gwmock_data.resampling import OVERSAMPLING_FACTOR, oversample_fourier, resample_uniform_sinc
 from gwmock_data.timeseries import TimeSeries
 
 logger = logging.getLogger("gwmock_data")
@@ -205,8 +205,10 @@ def inject(timeseries: TimeSeries, other: TimeSeries, interpolate_if_offset: boo
     see :func:`measure_content_before`), and those after it are the caller's to carry forward.
 
     When the offset is fractional, *other* is resampled onto *timeseries*' grid at the grid points
-    inside its own sample span, with the band-limited windowed-sinc kernel gwmock-signal projects
-    with (``resample_uniform_sinc``), and those are added. Positions come from integer grid indices
+    inside its own sample span, and those are added. It is first oversampled exactly
+    (``oversample_fourier``), so the band-limited windowed-sinc kernel gwmock-signal projects with
+    (``resample_uniform_sinc``) reads it at no more than half its own Nyquist frequency and stays
+    accurate up to *other*'s Nyquist frequency. Positions come from integer grid indices
     minus one offset rather than from per-sample GPS times, each of which carries float64 rounding
     of a sizeable fraction of a sample; the indices and the offset's fraction are passed to the
     kernel apart, never summed in float64, so the fraction is as precise at the end of a long target
@@ -274,8 +276,11 @@ def inject(timeseries: TimeSeries, other: TimeSeries, interpolate_if_offset: boo
         return timeseries
     # The positions are the grid indices less the offset: whole numbers of up to the target's length
     # plus one fraction, passed apart so the fraction keeps its precision at any index.
+    # On the oversampled grid both scale by the factor, exactly.
     whole = math.floor(offset)
     injected_data[first : last + 1] += resample_uniform_sinc(
-        np.asarray(other.data), np.arange(first, last + 1) - whole, fraction=whole - offset
+        oversample_fourier(np.asarray(other.data)),
+        OVERSAMPLING_FACTOR * (np.arange(first, last + 1) - whole),
+        fraction=OVERSAMPLING_FACTOR * (whole - offset),
     )
     return dataclasses.replace(timeseries, data=injected_data)

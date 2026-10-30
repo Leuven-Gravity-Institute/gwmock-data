@@ -15,8 +15,10 @@ same operation. The specification (tap count, window shape, weight formula) is d
     from a design formula. A Kaiser window is used because its stopband is controlled by a single parameter, so
     tap count and attenuation can be traded explicitly.
 
-    No windowed-sinc kernel resamples accurately for content arbitrarily close to Nyquist. The signal must be
-    oversampled with margin.
+    No windowed-sinc kernel resamples accurately for content arbitrarily close to Nyquist: the default is accurate
+    to 0.8 x Nyquist and fails above it (about 0.4 of a tone's amplitude at 0.98 x Nyquist). A series with content up
+    to its Nyquist frequency is therefore oversampled first, exactly, with :func:`oversample_fourier`, which puts
+    the whole of its band at or below half the kernel's Nyquist frequency.
 """
 
 from __future__ import annotations
@@ -97,6 +99,62 @@ def validate_kernel(taps: int, beta: float) -> tuple[int, float]:
             f"kernel silently loses several orders of magnitude of accuracy."
         )
     return taps, beta
+
+
+#: Factor by which :func:`oversample_fourier` refines a series before the kernel reads it. Twice the rate puts
+#: the input's whole band, up to its own Nyquist frequency, at or below half the kernel's Nyquist frequency,
+#: well inside the 0.8 x Nyquist the default kernel is accurate to; a larger factor gains nothing there and
+#: costs memory in proportion.
+OVERSAMPLING_FACTOR = 2
+
+
+def oversample_fourier(samples: np.ndarray, factor: int = OVERSAMPLING_FACTOR) -> np.ndarray:
+    """Return the band-limited interpolant of *samples* on a grid *factor* times finer.
+
+    Sample ``k`` of *samples* is sample ``factor * k`` of the result, which has ``factor * (n - 1) + 1`` samples,
+    so a position ``p`` on the input's grid is the position ``factor * p`` on the result's.
+
+    Computed in the frequency domain: the spectrum is extended with zeros up to the finer grid's Nyquist
+    frequency, so nothing is added or removed below the input's own. Before the transform the input is padded
+    with zeros to twice its length, so the circular transform does not wrap one end of the series into the
+    other. A component at exactly the input's Nyquist frequency has no unique interpolant (its samples are
+    those of a cosine at that frequency whatever its phase); it is split evenly between the positive and the
+    negative frequency, which keeps the result real and reproduces the input's samples.
+
+    The interpolant is global, as it has to be to stay accurate up to Nyquist: a series is interpolated as one
+    that is zero outside its samples, so one that ends abruptly rings near its ends with a tail falling as one over
+    the distance, where the windowed-sinc kernel alone is affected only within half its taps. A waveform tapered to
+    zero at both ends, as generated signals are, is unaffected. LAL's injection
+    (``XLALSimAddInjectionREAL8TimeSeries``) shifts by a fraction of a sample the same way, in the frequency domain
+    over the whole zero-padded series.
+
+    Peak memory is about 110 bytes per input sample at a factor of 2 (6.1 GB at 5.2e7 samples, a 1.8-hour series
+    at 8192 Hz), most of it the transforms' own working arrays.
+
+    Args:
+        samples: Uniformly sampled series, shape ``(n,)``.
+        factor: How many times finer the result's grid is; a positive integer.
+
+    Returns:
+        The interpolated series, shape ``(factor * (n - 1) + 1,)``; empty for an empty input.
+
+    Raises:
+        ValueError: If ``factor`` is not a positive integer, or ``samples`` is not one-dimensional.
+    """
+    if isinstance(factor, bool) or not isinstance(factor, (int, np.integer)) or factor < 1:
+        raise ValueError(f"factor must be a positive integer; got {factor!r}.")
+    samples = np.asarray(samples, dtype=float)
+    if samples.ndim != 1:
+        raise ValueError(f"samples must be one-dimensional; got shape {samples.shape}.")
+    n = samples.shape[0]
+    if n == 0 or factor == 1:
+        return samples.copy()
+    padded = 2 * n
+    spectrum = np.fft.rfft(samples, padded)
+    spectrum[-1] *= 0.5
+    # `irfft` extends the spectrum with zeros to the requested length itself, so the finer spectrum is
+    # never built as a separate array.
+    return np.fft.irfft(spectrum, factor * padded)[: factor * (n - 1) + 1] * factor
 
 
 def resample_uniform_sinc(
