@@ -13,11 +13,21 @@ import numpy as np
 from astropy.units import Quantity
 
 from gwmock_data.injection import alignment_tolerance, inject, is_aligned, measure_content_before
-from gwmock_data.resampling import resample_uniform_sinc
+from gwmock_data.resampling import OVERSAMPLING_FACTOR, oversample_fourier, resample_uniform_sinc
 from gwmock_data.timeseries import TimeSeries as ChannelSeries
 from gwmock_data.timeseries import as_timeseries
 
 logger = logging.getLogger("gwmock_data")
+
+#: Metadata key by which a chunk's producer declares it a whole signal that falls smoothly to zero at both
+#: ends, such as a generated compact-binary waveform; its value must be ``True`` itself, so a stray truthy
+#: value such as the string ``"false"`` does not count. An off-grid chunk so marked is oversampled exactly
+#: before it is resampled, and is placed accurately up to its Nyquist frequency rather than to 0.8 of it.
+#: Only the producer can know this: a chunk cut from a longer signal also ends in zeros once it is padded,
+#: but rings from its cut ends across its whole length if it is interpolated globally. Cropping that removes
+#: samples drops the mark (see :meth:`MultichannelTimeSeries.crop`), and so a returned tail, cropped from its
+#: chunk, is unmarked.
+TAPERED_METADATA_KEY = "gwmock_data.tapered"
 
 
 def _in_unit(value: float | Quantity, unit: str) -> float:
@@ -217,12 +227,18 @@ class MultichannelTimeSeries:
             end_time: End time of the cropped segment in GPS seconds. If None, use the
                 original end time.
 
+        A crop that removes samples leaves a piece cut from the series, so it also removes the
+        :data:`TAPERED_METADATA_KEY` mark: the piece no longer falls smoothly to zero at its ends.
+
         Returns:
             This MultichannelTimeSeries, cropped.
         """
         start = None if start_time is None else _in_unit(start_time, "s")
         end = None if end_time is None else _in_unit(end_time, "s")
+        before = [series.n_samples for series in self._data]
         self._data = [series.crop(start, end).copy() for series in self._data]
+        if [series.n_samples for series in self._data] != before:
+            self.metadata.pop(TAPERED_METADATA_KEY, None)
         return self
 
     def inject(
@@ -248,7 +264,10 @@ class MultichannelTimeSeries:
         different samples from earlier releases, most visibly at high frequency.
 
         The kernel is :func:`gwmock_data.resampling.resample_uniform_sinc`, the one the gwmock packages share,
-        so an off-grid chunk is resampled here exactly as gwmock-signal resamples when it projects.
+        so an off-grid chunk is resampled here exactly as gwmock-signal resamples when it projects. It is
+        accurate to 0.8 x Nyquist; a chunk whose metadata marks it tapered (:data:`TAPERED_METADATA_KEY`) is
+        first oversampled exactly (:func:`gwmock_data.resampling.oversample_fourier`) and is accurate up to
+        its Nyquist frequency.
 
         Args:
             other: MultichannelTimeSeries instance to inject.
@@ -330,10 +349,22 @@ class MultichannelTimeSeries:
                 return None
             whole = math.floor(idx)
             positions, fraction = np.arange(first, last + 1) - whole, whole - idx
+            if supplied.metadata.get(TAPERED_METADATA_KEY) is True:
+                # Oversampled exactly first; the positions and the fraction both scale by the factor, exactly.
+                channels = [
+                    resample_uniform_sinc(
+                        oversample_fourier(other[i].value),
+                        OVERSAMPLING_FACTOR * positions,
+                        fraction=OVERSAMPLING_FACTOR * fraction,
+                    )
+                    for i in range(len(other))
+                ]
+            else:
+                channels = [
+                    resample_uniform_sinc(other[i].value, positions, fraction=fraction) for i in range(len(other))
+                ]
             other = MultichannelTimeSeries(
-                data=np.array(
-                    [resample_uniform_sinc(other[i].value, positions, fraction=fraction) for i in range(len(other))]
-                ),
+                data=np.array(channels),
                 start_time=Quantity(
                     self.start_time.value + first / self.sampling_frequency.value, unit=self.start_time.unit
                 ),
@@ -342,6 +373,8 @@ class MultichannelTimeSeries:
 
         for i in range(self.num_of_channels):
             self[i] = inject(self[i], other[i])
+        # Its samples now hold more than the producer's whole signal, so it is no longer one.
+        self.metadata.pop(TAPERED_METADATA_KEY, None)
 
         # The tail is the resampled chunk when interpolation was needed, so it is already on this
         # segment's lattice and the next segment -- which continues that lattice -- places it as is.

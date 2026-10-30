@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from astropy.units import Quantity
 
-from gwmock_data.multichannel_series import MultichannelTimeSeries, MultichannelTimeSeriesList
+from gwmock_data.multichannel_series import TAPERED_METADATA_KEY, MultichannelTimeSeries, MultichannelTimeSeriesList
 from gwmock_data.resampling import resample_uniform_sinc
 
 
@@ -244,6 +244,119 @@ class TestInjectOffLatticeResampling:
             written = np.asarray(segment[channel])
             np.testing.assert_allclose(written[covered], scale * expected, rtol=0.0, atol=1e-15)
             assert np.max(np.abs(written[covered] - scale * analytic)[interior]) < 1e-9
+
+
+class TestTaperedChunks:
+    """A chunk its producer marks tapered is oversampled exactly; an unmarked one keeps the kernel alone."""
+
+    SAMPLING_FREQUENCY, START, LENGTH, SHIFT = 4096.0, 1e9, 8192, 1000.375
+
+    def _tone(self, positions):
+        return np.exp(-0.5 * ((positions - self.LENGTH / 2) / (self.LENGTH / 16)) ** 2) * np.cos(
+            0.98 * np.pi * positions
+        )
+
+    def _place(self, *, marked, segment_samples=10240):
+        segment = MultichannelTimeSeries(
+            data=np.zeros((2, segment_samples)), start_time=self.START, sampling_frequency=self.SAMPLING_FREQUENCY
+        )
+        values = self._tone(np.arange(self.LENGTH, dtype=float))
+        chunk = MultichannelTimeSeries(
+            data=np.stack([values, -2.0 * values]),
+            start_time=self.START + self.SHIFT / self.SAMPLING_FREQUENCY,
+            sampling_frequency=self.SAMPLING_FREQUENCY,
+        )
+        if marked:
+            chunk.metadata[TAPERED_METADATA_KEY] = True
+        tail = segment.inject(chunk)
+        return segment, tail
+
+    def test_a_marked_chunk_is_placed_to_roundoff_at_0_98_nyquist(self):
+        """On every channel, against the analytic signal."""
+        segment, _ = self._place(marked=True)
+        covered = np.arange(1001, 1000 + self.LENGTH)
+        for channel, scale in enumerate((1.0, -2.0)):
+            written = np.asarray(segment[channel])[covered]
+            assert np.max(np.abs(written - scale * self._tone(covered - self.SHIFT))) < 1e-10
+
+    def test_an_unmarked_chunk_is_resampled_by_the_kernel_alone(self):
+        """Unchanged from before the mark existed, and so off by more than a hundredth at 0.98 x Nyquist."""
+        segment, _ = self._place(marked=False)
+        covered = np.arange(1001, 1000 + self.LENGTH)
+        written = np.asarray(segment[0])[covered]
+        np.testing.assert_array_equal(
+            written, resample_uniform_sinc(self._tone(np.arange(self.LENGTH, dtype=float)), covered - self.SHIFT)
+        )
+        assert np.max(np.abs(written - self._tone(covered - self.SHIFT))) > 1e-2
+
+    @pytest.mark.parametrize("value", ["false", "true", 1, "yes"])
+    def test_only_true_itself_marks_a_chunk(self, value):
+        """A truthy value that is not ``True`` -- easy to produce through JSON -- leaves the kernel alone."""
+        unmarked, _ = self._place(marked=False)
+        values = self._tone(np.arange(self.LENGTH, dtype=float))
+        chunk = MultichannelTimeSeries(
+            data=np.stack([values, -2.0 * values]),
+            start_time=self.START + self.SHIFT / self.SAMPLING_FREQUENCY,
+            sampling_frequency=self.SAMPLING_FREQUENCY,
+        )
+        chunk.metadata[TAPERED_METADATA_KEY] = value
+        segment = MultichannelTimeSeries(
+            data=np.zeros((2, 10240)), start_time=self.START, sampling_frequency=self.SAMPLING_FREQUENCY
+        )
+        segment.inject(chunk)
+        np.testing.assert_array_equal(np.asarray(segment[0]), np.asarray(unmarked[0]))
+
+    def test_a_marked_segment_injected_into_is_no_longer_marked(self):
+        """Once something is added into it, a marked series is no longer the producer's whole signal."""
+        segment = MultichannelTimeSeries(
+            data=np.zeros((2, 10240)), start_time=self.START, sampling_frequency=self.SAMPLING_FREQUENCY
+        )
+        segment.metadata[TAPERED_METADATA_KEY] = True
+        chunk = MultichannelTimeSeries(
+            data=np.ones((2, 16)), start_time=self.START, sampling_frequency=self.SAMPLING_FREQUENCY
+        )
+        segment.inject(chunk)
+        assert TAPERED_METADATA_KEY not in segment.metadata
+
+    def test_the_tail_of_a_marked_chunk_is_not_marked(self):
+        """A tail is cut from the chunk, so it is no longer a whole tapered signal."""
+        _, tail = self._place(marked=True, segment_samples=4096)
+        assert tail is not None
+        assert TAPERED_METADATA_KEY not in tail.metadata
+
+
+class TestCroppingDropsTheTaperedMark:
+    """A cropped piece of a marked signal is cut, so it must not reach the exact, global oversampling."""
+
+    def _marked(self):
+        chunk = MultichannelTimeSeries(data=np.ones((2, 64)), start_time=1e9, sampling_frequency=64.0)
+        chunk.metadata[TAPERED_METADATA_KEY] = True
+        return chunk
+
+    def test_a_crop_that_removes_samples_drops_the_mark(self):
+        """Marked whole, cropped to a part: unmarked."""
+        chunk = self._marked().crop(start_time=1e9 + 0.25)
+        assert TAPERED_METADATA_KEY not in chunk.metadata
+
+    def test_a_crop_that_removes_nothing_keeps_it(self):
+        """Cropping to the whole span leaves the signal whole."""
+        chunk = self._marked().crop(start_time=1e9, end_time=1e9 + 1.0)
+        assert chunk.metadata[TAPERED_METADATA_KEY] is True
+
+    def test_a_cropped_marked_chunk_is_resampled_by_the_kernel_alone(self):
+        """Marked whole, cropped, then injected off the grid: the kernel's result, not the oversampled one."""
+        k = np.arange(4096, dtype=float)
+        values = np.cos(0.98 * np.pi * k)
+        chunk = MultichannelTimeSeries(
+            data=values[np.newaxis, :], start_time=1e9 + 0.375 / 4096, sampling_frequency=4096.0
+        )
+        chunk.metadata[TAPERED_METADATA_KEY] = True
+        chunk.crop(start_time=1e9 + (1024 + 0.375) / 4096)
+        segment = MultichannelTimeSeries(data=np.zeros((1, 4096)), start_time=1e9, sampling_frequency=4096.0)
+        segment.inject(chunk)
+        cut = values[1024:]
+        covered = np.arange(1025, 4096)
+        np.testing.assert_array_equal(np.asarray(segment[0])[covered], resample_uniform_sinc(cut, covered - 1024.375))
 
 
 class TestTheOffGridWarningDescribesTheResampling:

@@ -12,7 +12,7 @@ from gwmock_data.injection import (
     inject,
     is_aligned,
 )
-from gwmock_data.resampling import resample_uniform_sinc
+from gwmock_data.resampling import OVERSAMPLING_FACTOR, oversample_fourier, resample_uniform_sinc
 
 
 def _series(data, t0=0.0, dt=None, unit=None, sample_rate=None):
@@ -1201,3 +1201,60 @@ def test_a_long_chunk_off_the_grid_keeps_its_fraction_to_its_last_sample():
     k = np.arange(n - 2000, n - 200)  # the far end, inside the kernel's reach of the chunk
     want = np.cos(0.5 * np.pi * (k % 4) - 0.5 * np.pi * offset + 0.3)
     assert np.max(np.abs(result[k] - want)) < 1e-11
+
+
+class TestTaperedInjection:
+    """A whole signal tapered to zero at both ends is oversampled exactly, and placed accurately up to Nyquist.
+
+    The windowed-sinc kernel alone is accurate to 0.8 x Nyquist: 2e-6 off at 0.9, about a tenth at 0.98. The
+    envelope here is Gaussian, eight widths from either end, so the chunk is band-limited to
+    roundoff and its value between samples is known analytically.
+    """
+
+    LENGTH = 8192
+    SAMPLING_FREQUENCY = 4096.0
+
+    def _tone(self, positions, frequency_over_nyquist):
+        return np.exp(-0.5 * ((positions - self.LENGTH / 2) / (self.LENGTH / 16)) ** 2) * np.cos(
+            frequency_over_nyquist * np.pi * positions + 0.3
+        )
+
+    def _inject(self, frequency_over_nyquist, *, tapered):
+        dt = 1 / self.SAMPLING_FREQUENCY
+        target = _series(np.zeros(10240), t0=0.0, dt=dt)
+        other = _series(self._tone(np.arange(self.LENGTH, dtype=float), frequency_over_nyquist), t0=1000.37 * dt, dt=dt)
+        offset = (other.t0 - target.t0) * self.SAMPLING_FREQUENCY
+        covered = np.arange(1001, 1000 + self.LENGTH)
+        return inject(target, other, tapered=tapered).value[covered], covered - offset, other, covered, offset
+
+    @pytest.mark.parametrize("frequency_over_nyquist", [0.5, 0.9, 0.98, 0.995])
+    def test_a_tapered_chunk_is_placed_to_roundoff_up_to_nyquist(self, frequency_over_nyquist: float):
+        """Against the analytic signal, which neither the kernel nor the oversampling computes."""
+        placed, positions, *_ = self._inject(frequency_over_nyquist, tapered=True)
+        assert np.max(np.abs(placed - self._tone(positions, frequency_over_nyquist))) < 1e-10
+
+    def test_an_unmarked_chunk_keeps_the_kernel_alone(self):
+        """Without the mark the same chunk is resampled by the kernel alone, as before, and fails near Nyquist.
+
+        Pinned bit for bit to the kernel, so the default path is unchanged; and shown to be off by more than a
+        hundredth at 0.98 x Nyquist, which is what the mark is for.
+        """
+        placed, positions, other, covered, offset = self._inject(0.98, tapered=False)
+        whole = np.floor(offset).astype(int)
+        np.testing.assert_array_equal(
+            placed, resample_uniform_sinc(np.asarray(other.data), covered - whole, fraction=whole - offset)
+        )
+        assert np.max(np.abs(placed - self._tone(positions, 0.98))) > 1e-2
+
+    def test_a_tapered_chunk_reads_the_kernel_on_the_oversampled_grid(self):
+        """Structurally: the kernel evaluated at the scaled positions of the exactly oversampled chunk."""
+        placed, _, other, covered, offset = self._inject(0.98, tapered=True)
+        whole = np.floor(offset).astype(int)
+        np.testing.assert_array_equal(
+            placed,
+            resample_uniform_sinc(
+                oversample_fourier(np.asarray(other.data)),
+                OVERSAMPLING_FACTOR * (covered - whole),
+                fraction=OVERSAMPLING_FACTOR * (whole - offset),
+            ),
+        )
