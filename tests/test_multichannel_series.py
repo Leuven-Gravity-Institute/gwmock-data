@@ -306,6 +306,18 @@ class TestTaperedChunks:
         segment.inject(chunk)
         np.testing.assert_array_equal(np.asarray(segment[0]), np.asarray(unmarked[0]))
 
+    def test_a_marked_segment_injected_into_is_no_longer_marked(self):
+        """Once something is added into it, a marked series is no longer the producer's whole signal."""
+        segment = MultichannelTimeSeries(
+            data=np.zeros((2, 10240)), start_time=self.START, sampling_frequency=self.SAMPLING_FREQUENCY
+        )
+        segment.metadata[TAPERED_METADATA_KEY] = True
+        chunk = MultichannelTimeSeries(
+            data=np.ones((2, 16)), start_time=self.START, sampling_frequency=self.SAMPLING_FREQUENCY
+        )
+        segment.inject(chunk)
+        assert TAPERED_METADATA_KEY not in segment.metadata
+
     def test_the_tail_of_a_marked_chunk_is_not_marked(self):
         """A tail is cut from the chunk, so it is no longer a whole tapered signal."""
         _, tail = self._place(marked=True, segment_samples=4096)

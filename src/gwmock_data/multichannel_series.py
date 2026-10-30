@@ -373,6 +373,8 @@ class MultichannelTimeSeries:
 
         for i in range(self.num_of_channels):
             self[i] = inject(self[i], other[i])
+        # Its samples now hold more than the producer's whole signal, so it is no longer one.
+        self.metadata.pop(TAPERED_METADATA_KEY, None)
 
         # The tail is the resampled chunk when interpolation was needed, so it is already on this
         # segment's lattice and the next segment -- which continues that lattice -- places it as is.

@@ -134,7 +134,7 @@ def oversample_fourier(samples: np.ndarray, factor: int = OVERSAMPLING_FACTOR) -
     at 8192 Hz), most of it the transforms' own working arrays.
 
     Args:
-        samples: Uniformly sampled series, shape ``(n,)``.
+        samples: Uniformly sampled real series, shape ``(n,)``; taken as float, as by the kernel.
         factor: How many times finer the result's grid is; a positive integer.
 
     Returns:
