@@ -753,26 +753,18 @@ class TestInjectInterpolationQuality:
         assert np.all(result.value[25:45] >= lower_threshold)
 
     def test_off_lattice_resampling_uses_the_shared_sinc_kernel(self):
-        """An off-lattice injection is oversampled exactly and resampled with gwmock-signal's windowed-sinc kernel.
+        """An off-lattice injection is resampled with gwmock-signal's windowed-sinc kernel.
 
         A 0.8 x Nyquist sinusoid shifted by 0.37 samples, the regime where a cubic spline and the
         sinc kernel part ways: cubic is off by ~0.31 of peak here. Pinned two ways -- equal to the
-        shared kernel evaluated at the expected positions on the oversampled series, and accurate
-        against the analytic signal, which neither implementation computes.
-
-        The envelope is Gaussian, so the analytic signal is band-limited and is what the samples
-        interpolate to. A Hann envelope is not: its samples' band-limited interpolant differs from
-        the analytic Hann-tapered tone by 2.7e-8 here (measured with a direct, untruncated sinc sum),
-        which is the taper's content above Nyquist, folded back by sampling.
+        shared kernel evaluated at the expected positions, and accurate against the analytic signal,
+        which neither implementation computes.
         """
         sampling_frequency = 4096.0
         timeseries = _series(np.zeros(4096), t0=0.0, dt=1 / sampling_frequency)
         length, shift, frequency = 2048, 1000.37, 0.8 * sampling_frequency / 2
-
-        def envelope(positions):
-            return np.exp(-0.5 * ((positions - length / 2) / (length / 16)) ** 2)
-
-        values = envelope(np.arange(length)) * np.sin(2 * np.pi * frequency * np.arange(length) / sampling_frequency)
+        envelope = np.hanning(length)
+        values = envelope * np.sin(2 * np.pi * frequency * np.arange(length) / sampling_frequency)
         other = _series(values, t0=shift / sampling_frequency, dt=1 / sampling_frequency)
 
         result = inject(timeseries, other).value
@@ -784,42 +776,15 @@ class TestInjectInterpolationQuality:
         whole = np.floor(offset).astype(int)
         np.testing.assert_allclose(
             result[covered],
-            resample_uniform_sinc(
-                oversample_fourier(values),
-                OVERSAMPLING_FACTOR * (covered - whole),
-                fraction=OVERSAMPLING_FACTOR * (whole - offset),
-            ),
+            resample_uniform_sinc(values, covered - whole, fraction=whole - offset),
             rtol=0.0,
             atol=1e-15,
         )
         interior = (positions > 200) & (positions < length - 200)
-        analytic = envelope(positions) * np.sin(2 * np.pi * frequency * positions / sampling_frequency)
+        analytic = (0.5 - 0.5 * np.cos(2 * np.pi * positions / (length - 1))) * np.sin(
+            2 * np.pi * frequency * positions / sampling_frequency
+        )
         assert np.max(np.abs(result[covered] - analytic)[interior]) < 1e-9
-
-    @pytest.mark.parametrize("frequency_over_nyquist", [0.9, 0.98, 0.995])
-    def test_off_lattice_content_up_against_nyquist_is_placed_accurately(self, frequency_over_nyquist: float):
-        """Content anywhere below Nyquist lands to roundoff, not only below 0.8 x Nyquist.
-
-        The kernel alone is off by 2e-6 of the signal at 0.9 x Nyquist and by about a tenth at 0.98; the
-        exact oversampling ahead of it is what this pins. The envelope is Gaussian so the chunk is
-        band-limited and its value between samples is known.
-        """
-        sampling_frequency = 4096.0
-        length, shift = 8192, 1000.37
-        timeseries = _series(np.zeros(10240), t0=0.0, dt=1 / sampling_frequency)
-
-        def tone(positions):
-            return np.exp(-0.5 * ((positions - length / 2) / (length / 16)) ** 2) * np.cos(
-                frequency_over_nyquist * np.pi * positions + 0.3
-            )
-
-        other = _series(tone(np.arange(length, dtype=float)), t0=shift / sampling_frequency, dt=1 / sampling_frequency)
-
-        result = inject(timeseries, other).value
-
-        offset = (other.t0 - timeseries.t0) * sampling_frequency
-        covered = np.arange(1001, 1000 + length)
-        assert np.max(np.abs(result[covered] - tone(covered - offset))) < 1e-10
 
 
 class TestInjectMixedSigns:
@@ -1230,17 +1195,66 @@ def test_a_long_chunk_off_the_grid_keeps_its_fraction_to_its_last_sample():
     """
     n = 1 << 20
     offset = 0.123456789012345
-    # A tone under a Gaussian envelope centred near the far end, where the positions are largest. The chunk is
-    # resampled as the band-limited interpolant of its samples, zero outside them, so an abruptly ending chunk
-    # would ring like one; the envelope is ten widths from either end, below roundoff there. The tone is taken
-    # at `k % 4`, since a phase of 0.5 * pi * k near k = 1e6 is itself rounded by about 2e-10.
-    centre, width = n - 50_000, 5_000.0
-    k_all = np.arange(n)
-    values = np.exp(-0.5 * ((k_all - centre) / width) ** 2) * np.cos(0.5 * np.pi * (k_all % 4) + 0.3)
+    values = np.tile(np.cos(0.5 * np.pi * np.arange(4) + 0.3), n // 4)
     target = _series(np.zeros(n + 8), t0=0.0, sample_rate=1.0)
     result = np.asarray(inject(target, _series(values, t0=offset, sample_rate=1.0)).data)
-    k = np.arange(centre - 2000, centre + 2000)
-    want = np.exp(-0.5 * ((k - offset - centre) / width) ** 2) * np.cos(
-        0.5 * np.pi * (k % 4) - 0.5 * np.pi * offset + 0.3
-    )
+    k = np.arange(n - 2000, n - 200)  # the far end, inside the kernel's reach of the chunk
+    want = np.cos(0.5 * np.pi * (k % 4) - 0.5 * np.pi * offset + 0.3)
     assert np.max(np.abs(result[k] - want)) < 1e-11
+
+
+class TestTaperedInjection:
+    """A whole signal tapered to zero at both ends is oversampled exactly, and placed accurately up to Nyquist.
+
+    The windowed-sinc kernel alone is accurate to 0.8 x Nyquist: 2e-6 off at 0.9, about a tenth at 0.98. The
+    envelope here is Gaussian, eight widths from either end, so the chunk is band-limited to
+    roundoff and its value between samples is known analytically.
+    """
+
+    LENGTH = 8192
+    SAMPLING_FREQUENCY = 4096.0
+
+    def _tone(self, positions, frequency_over_nyquist):
+        return np.exp(-0.5 * ((positions - self.LENGTH / 2) / (self.LENGTH / 16)) ** 2) * np.cos(
+            frequency_over_nyquist * np.pi * positions + 0.3
+        )
+
+    def _inject(self, frequency_over_nyquist, *, tapered):
+        dt = 1 / self.SAMPLING_FREQUENCY
+        target = _series(np.zeros(10240), t0=0.0, dt=dt)
+        other = _series(self._tone(np.arange(self.LENGTH, dtype=float), frequency_over_nyquist), t0=1000.37 * dt, dt=dt)
+        offset = (other.t0 - target.t0) * self.SAMPLING_FREQUENCY
+        covered = np.arange(1001, 1000 + self.LENGTH)
+        return inject(target, other, tapered=tapered).value[covered], covered - offset, other, covered, offset
+
+    @pytest.mark.parametrize("frequency_over_nyquist", [0.5, 0.9, 0.98, 0.995])
+    def test_a_tapered_chunk_is_placed_to_roundoff_up_to_nyquist(self, frequency_over_nyquist: float):
+        """Against the analytic signal, which neither the kernel nor the oversampling computes."""
+        placed, positions, *_ = self._inject(frequency_over_nyquist, tapered=True)
+        assert np.max(np.abs(placed - self._tone(positions, frequency_over_nyquist))) < 1e-10
+
+    def test_an_unmarked_chunk_keeps_the_kernel_alone(self):
+        """Without the mark the same chunk is resampled by the kernel alone, as before, and fails near Nyquist.
+
+        Pinned bit for bit to the kernel, so the default path is unchanged; and shown to be off by more than a
+        hundredth at 0.98 x Nyquist, which is what the mark is for.
+        """
+        placed, positions, other, covered, offset = self._inject(0.98, tapered=False)
+        whole = np.floor(offset).astype(int)
+        np.testing.assert_array_equal(
+            placed, resample_uniform_sinc(np.asarray(other.data), covered - whole, fraction=whole - offset)
+        )
+        assert np.max(np.abs(placed - self._tone(positions, 0.98))) > 1e-2
+
+    def test_a_tapered_chunk_reads_the_kernel_on_the_oversampled_grid(self):
+        """Structurally: the kernel evaluated at the scaled positions of the exactly oversampled chunk."""
+        placed, _, other, covered, offset = self._inject(0.98, tapered=True)
+        whole = np.floor(offset).astype(int)
+        np.testing.assert_array_equal(
+            placed,
+            resample_uniform_sinc(
+                oversample_fourier(np.asarray(other.data)),
+                OVERSAMPLING_FACTOR * (covered - whole),
+                fraction=OVERSAMPLING_FACTOR * (whole - offset),
+            ),
+        )

@@ -17,8 +17,9 @@ same operation. The specification (tap count, window shape, weight formula) is d
 
     No windowed-sinc kernel resamples accurately for content arbitrarily close to Nyquist: the default is accurate
     to 0.8 x Nyquist and fails above it (about 0.4 of a tone's amplitude at 0.98 x Nyquist). A series with content up
-    to its Nyquist frequency is therefore oversampled first, exactly, with :func:`oversample_fourier`, which puts
-    the whole of its band at or below half the kernel's Nyquist frequency.
+    to its Nyquist frequency is therefore oversampled first with :func:`oversample_fourier`, which puts the
+    whole of its band at or below half the kernel's Nyquist frequency -- exactly, when the series is a whole
+    signal tapered to zero at both ends.
 """
 
 from __future__ import annotations
@@ -114,19 +115,20 @@ def oversample_fourier(samples: np.ndarray, factor: int = OVERSAMPLING_FACTOR) -
     Sample ``k`` of *samples* is sample ``factor * k`` of the result, which has ``factor * (n - 1) + 1`` samples,
     so a position ``p`` on the input's grid is the position ``factor * p`` on the result's.
 
-    Computed in the frequency domain: the spectrum is extended with zeros up to the finer grid's Nyquist
-    frequency, so nothing is added or removed below the input's own. Before the transform the input is padded
-    with zeros to twice its length, so the circular transform does not wrap one end of the series into the
-    other. A component at exactly the input's Nyquist frequency has no unique interpolant (its samples are
-    those of a cosine at that frequency whatever its phase); it is split evenly between the positive and the
+    Computed in the frequency domain: the input, padded with zeros to twice its length, is transformed, and its
+    spectrum extended with zeros up to the finer grid's Nyquist frequency, so nothing is added or removed below
+    the input's own. A component at exactly the input's Nyquist frequency has no unique interpolant (its samples
+    are those of a cosine at that frequency whatever its phase); it is split evenly between the positive and the
     negative frequency, which keeps the result real and reproduces the input's samples.
 
-    The interpolant is global, as it has to be to stay accurate up to Nyquist: a series is interpolated as one
-    that is zero outside its samples, so one that ends abruptly rings near its ends with a tail falling as one over
-    the distance, where the windowed-sinc kernel alone is affected only within half its taps. A waveform tapered to
-    zero at both ends, as generated signals are, is unaffected. LAL's injection
-    (``XLALSimAddInjectionREAL8TimeSeries``) shifts by a fraction of a sample the same way, in the frequency domain
-    over the whole zero-padded series.
+    What this computes is the band-limited interpolant of the padded series repeated with period ``2 n``. For a
+    series that falls smoothly to zero at both ends, such as a whole generated waveform, the repetitions
+    contribute nothing and it is the band-limited interpolant of the series taken as zero outside its samples,
+    accurate to roundoff up to the input's Nyquist frequency. For one that ends abruptly it is neither: the
+    abrupt ends ring across the whole result -- 8e-5 of the signal mid-series for an abruptly ending tone at
+    0.995 x Nyquist of 8192 samples, and more towards its ends -- where the windowed-sinc kernel alone is affected only within half its taps of them. Use it only on
+    whole, tapered series. LAL's injection (``XLALSimAddInjectionREAL8TimeSeries``) shifts a series by a fraction
+    of a sample the same way, in the frequency domain over the whole zero-padded series.
 
     Peak memory is about 110 bytes per input sample at a factor of 2 (6.1 GB at 5.2e7 samples, a 1.8-hour series
     at 8192 Hz), most of it the transforms' own working arrays.

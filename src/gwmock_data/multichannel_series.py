@@ -19,6 +19,14 @@ from gwmock_data.timeseries import as_timeseries
 
 logger = logging.getLogger("gwmock_data")
 
+#: Metadata key by which a chunk's producer declares it a whole signal that falls smoothly to zero at both
+#: ends, such as a generated compact-binary waveform. An off-grid chunk so marked is oversampled exactly
+#: before it is resampled, and is placed accurately up to its Nyquist frequency rather than to 0.8 of it.
+#: Only the producer can know this: a chunk cut from a longer signal also ends in zeros once it is padded,
+#: but rings from its cut ends across its whole length if it is interpolated globally. A returned tail is a
+#: cut piece, so the mark is not carried onto it.
+TAPERED_METADATA_KEY = "tapered"
+
 
 def _in_unit(value: float | Quantity, unit: str) -> float:
     """Return *value* as a float in *unit*; a plain number is taken to be in that unit already."""
@@ -248,9 +256,10 @@ class MultichannelTimeSeries:
         different samples from earlier releases, most visibly at high frequency.
 
         The kernel is :func:`gwmock_data.resampling.resample_uniform_sinc`, the one the gwmock packages share,
-        so an off-grid chunk is resampled here exactly as gwmock-signal resamples when it projects. Each channel
-        is first oversampled exactly (:func:`gwmock_data.resampling.oversample_fourier`), which keeps the
-        kernel accurate up to the chunk's Nyquist frequency rather than to 0.8 of it.
+        so an off-grid chunk is resampled here exactly as gwmock-signal resamples when it projects. It is
+        accurate to 0.8 x Nyquist; a chunk whose metadata marks it tapered (:data:`TAPERED_METADATA_KEY`) is
+        first oversampled exactly (:func:`gwmock_data.resampling.oversample_fourier`) and is accurate up to
+        its Nyquist frequency.
 
         Args:
             other: MultichannelTimeSeries instance to inject.
@@ -323,25 +332,31 @@ class MultichannelTimeSeries:
             # ~half its taps of context on each side, so resampling segment by segment would cut
             # that context at every boundary: measured errors there reached the signal's own peak,
             # where resampling the whole chunk leaves none. The tail returned below is then already
-            # on the lattice, so a contiguous next segment places it without resampling it again. The exact
-            # oversampling ahead of the kernel reads the whole chunk at once, so it too needs the chunk whole.
+            # on the lattice, so a contiguous next segment places it without resampling it again.
             #
-            # Same oversampling, kernel and integer-index-minus-one-offset positions as `inject`: the indices
-            # and the offset's fraction passed apart, so the fraction keeps its precision at any index, and both
-            # scaled by the oversampling factor, exactly.
+            # Same kernel, and the same integer-index-minus-one-offset positions, as `inject`: the indices
+            # and the offset's fraction passed apart, so the fraction keeps its precision at any index.
             if first > last:
                 logger.warning("Chunk spans no sample of the segment grid. No injection performed.")
                 return None
             whole = math.floor(idx)
-            positions = OVERSAMPLING_FACTOR * (np.arange(first, last + 1) - whole)
-            fraction = OVERSAMPLING_FACTOR * (whole - idx)
+            positions, fraction = np.arange(first, last + 1) - whole, whole - idx
+            if supplied.metadata.get(TAPERED_METADATA_KEY, False):
+                # Oversampled exactly first; the positions and the fraction both scale by the factor, exactly.
+                channels = [
+                    resample_uniform_sinc(
+                        oversample_fourier(other[i].value),
+                        OVERSAMPLING_FACTOR * positions,
+                        fraction=OVERSAMPLING_FACTOR * fraction,
+                    )
+                    for i in range(len(other))
+                ]
+            else:
+                channels = [
+                    resample_uniform_sinc(other[i].value, positions, fraction=fraction) for i in range(len(other))
+                ]
             other = MultichannelTimeSeries(
-                data=np.array(
-                    [
-                        resample_uniform_sinc(oversample_fourier(other[i].value), positions, fraction=fraction)
-                        for i in range(len(other))
-                    ]
-                ),
+                data=np.array(channels),
                 start_time=Quantity(
                     self.start_time.value + first / self.sampling_frequency.value, unit=self.start_time.unit
                 ),
@@ -368,6 +383,8 @@ class MultichannelTimeSeries:
             # `injection_parameters` -- and the channel name and unit -- from any injection long
             # enough to cross a boundary, which is precisely the long-inspiral case.
             tail.metadata.update(dict(supplied.metadata))
+            # A tail is cut from the chunk, so it is no longer a whole tapered signal.
+            tail.metadata.pop(TAPERED_METADATA_KEY, None)
             for index in range(min(tail.num_of_channels, supplied.num_of_channels)):
                 source = supplied[index]
                 tail._data[index] = dataclasses.replace(tail[index], name=source.name, unit=source.unit)

@@ -195,7 +195,9 @@ def units_are_compatible(target_unit: str | None, other_unit: str | None) -> boo
     return target_unit in _DIMENSIONLESS and other_unit in _DIMENSIONLESS
 
 
-def inject(timeseries: TimeSeries, other: TimeSeries, interpolate_if_offset: bool = True) -> TimeSeries:
+def inject(
+    timeseries: TimeSeries, other: TimeSeries, interpolate_if_offset: bool = True, *, tapered: bool = False
+) -> TimeSeries:
     """Add *other* into *timeseries* where the two overlap, and return the sum.
 
     Placement is by sample index on *timeseries*' grid. The offset of *other*'s first sample is
@@ -205,21 +207,28 @@ def inject(timeseries: TimeSeries, other: TimeSeries, interpolate_if_offset: boo
     see :func:`measure_content_before`), and those after it are the caller's to carry forward.
 
     When the offset is fractional, *other* is resampled onto *timeseries*' grid at the grid points
-    inside its own sample span, and those are added. It is first oversampled exactly
-    (``oversample_fourier``), so the band-limited windowed-sinc kernel gwmock-signal projects with
-    (``resample_uniform_sinc``) reads it at no more than half its own Nyquist frequency and stays
-    accurate up to *other*'s Nyquist frequency. Positions come from integer grid indices
+    inside its own sample span, with the band-limited windowed-sinc kernel gwmock-signal projects
+    with (``resample_uniform_sinc``), and those are added. Positions come from integer grid indices
     minus one offset rather than from per-sample GPS times, each of which carries float64 rounding
     of a sizeable fraction of a sample; the indices and the offset's fraction are passed to the
     kernel apart, never summed in float64, so the fraction is as precise at the end of a long target
     as at its start. The whole of *other* is the kernel's input, so samples just
     outside *timeseries* still give context at its edges.
 
+    The kernel alone is accurate to 0.8 x Nyquist. When *other* is a whole signal tapered to zero at
+    both ends (``tapered``), it is first oversampled exactly (``oversample_fourier``), and placed
+    accurately up to its own Nyquist frequency. That interpolation is global, so it is used only on
+    the caller's word: a chunk cut from a longer signal would ring from its cut ends across its whole
+    length, where the kernel alone is affected only within half its taps of them.
+
     Args:
         timeseries: The series to add into. It is not changed.
         other: The series to add. Same sample rate as *timeseries*.
         interpolate_if_offset: Whether to resample a fractional offset; if not, *timeseries* is
             returned unchanged.
+        tapered: Whether *other* is a whole signal that falls smoothly to zero at both ends, so it can
+            be oversampled exactly before resampling. Leave it False for a chunk cut from a longer
+            signal.
 
     Returns:
         A new series with *timeseries*' timing, name and unit, holding the sum.
@@ -276,11 +285,17 @@ def inject(timeseries: TimeSeries, other: TimeSeries, interpolate_if_offset: boo
         return timeseries
     # The positions are the grid indices less the offset: whole numbers of up to the target's length
     # plus one fraction, passed apart so the fraction keeps its precision at any index.
-    # On the oversampled grid both scale by the factor, exactly.
     whole = math.floor(offset)
-    injected_data[first : last + 1] += resample_uniform_sinc(
-        oversample_fourier(np.asarray(other.data)),
-        OVERSAMPLING_FACTOR * (np.arange(first, last + 1) - whole),
-        fraction=OVERSAMPLING_FACTOR * (whole - offset),
-    )
+    values = np.asarray(other.data)
+    if tapered:
+        # On the oversampled grid the positions and the fraction both scale by the factor, exactly.
+        injected_data[first : last + 1] += resample_uniform_sinc(
+            oversample_fourier(values),
+            OVERSAMPLING_FACTOR * (np.arange(first, last + 1) - whole),
+            fraction=OVERSAMPLING_FACTOR * (whole - offset),
+        )
+    else:
+        injected_data[first : last + 1] += resample_uniform_sinc(
+            values, np.arange(first, last + 1) - whole, fraction=whole - offset
+        )
     return dataclasses.replace(timeseries, data=injected_data)
