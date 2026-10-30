@@ -289,6 +289,23 @@ class TestTaperedChunks:
         )
         assert np.max(np.abs(written - self._tone(covered - self.SHIFT))) > 1e-2
 
+    @pytest.mark.parametrize("value", ["false", "true", 1, "yes"])
+    def test_only_true_itself_marks_a_chunk(self, value):
+        """A truthy value that is not ``True`` -- easy to produce through JSON -- leaves the kernel alone."""
+        unmarked, _ = self._place(marked=False)
+        values = self._tone(np.arange(self.LENGTH, dtype=float))
+        chunk = MultichannelTimeSeries(
+            data=np.stack([values, -2.0 * values]),
+            start_time=self.START + self.SHIFT / self.SAMPLING_FREQUENCY,
+            sampling_frequency=self.SAMPLING_FREQUENCY,
+        )
+        chunk.metadata[TAPERED_METADATA_KEY] = value
+        segment = MultichannelTimeSeries(
+            data=np.zeros((2, 10240)), start_time=self.START, sampling_frequency=self.SAMPLING_FREQUENCY
+        )
+        segment.inject(chunk)
+        np.testing.assert_array_equal(np.asarray(segment[0]), np.asarray(unmarked[0]))
+
     def test_the_tail_of_a_marked_chunk_is_not_marked(self):
         """A tail is cut from the chunk, so it is no longer a whole tapered signal."""
         _, tail = self._place(marked=True, segment_samples=4096)

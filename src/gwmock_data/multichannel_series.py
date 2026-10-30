@@ -20,13 +20,14 @@ from gwmock_data.timeseries import as_timeseries
 logger = logging.getLogger("gwmock_data")
 
 #: Metadata key by which a chunk's producer declares it a whole signal that falls smoothly to zero at both
-#: ends, such as a generated compact-binary waveform. An off-grid chunk so marked is oversampled exactly
+#: ends, such as a generated compact-binary waveform; its value must be ``True`` itself, so a stray truthy
+#: value such as the string ``"false"`` does not count. An off-grid chunk so marked is oversampled exactly
 #: before it is resampled, and is placed accurately up to its Nyquist frequency rather than to 0.8 of it.
 #: Only the producer can know this: a chunk cut from a longer signal also ends in zeros once it is padded,
 #: but rings from its cut ends across its whole length if it is interpolated globally. Cropping that removes
 #: samples drops the mark (see :meth:`MultichannelTimeSeries.crop`), and so a returned tail, cropped from its
 #: chunk, is unmarked.
-TAPERED_METADATA_KEY = "tapered"
+TAPERED_METADATA_KEY = "gwmock_data.tapered"
 
 
 def _in_unit(value: float | Quantity, unit: str) -> float:
@@ -348,7 +349,7 @@ class MultichannelTimeSeries:
                 return None
             whole = math.floor(idx)
             positions, fraction = np.arange(first, last + 1) - whole, whole - idx
-            if supplied.metadata.get(TAPERED_METADATA_KEY, False):
+            if supplied.metadata.get(TAPERED_METADATA_KEY) is True:
                 # Oversampled exactly first; the positions and the fraction both scale by the factor, exactly.
                 channels = [
                     resample_uniform_sinc(
