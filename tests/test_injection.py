@@ -8,9 +8,11 @@ import pytest
 from gwmock_data import TimeSeries
 from gwmock_data.injection import (
     _MAXIMUM_ALIGNMENT_TOLERANCE,
+    NO_OP_SHIFT_SAMPLES,
     alignment_tolerance,
     inject,
     is_aligned,
+    places_whole_samples,
 )
 from gwmock_data.resampling import OVERSAMPLING_FACTOR, oversample_fourier, resample_uniform_sinc
 
@@ -969,18 +971,18 @@ class TestAlignmentTolerance:
 
     @pytest.mark.parametrize("sampling_frequency", [1000.0, 2000.0, 3000.0, 4000.0, 4096.0, 8192.0])
     @pytest.mark.parametrize("offset_samples", [1_000, 1_000_000])
-    def test_a_genuinely_aligned_chunk_is_not_interpolated(self, sampling_frequency: float, offset_samples: int):
-        """Tightening the tolerance must not push real alignments onto the interpolation path.
+    def test_a_chunk_declared_on_the_grid_is_not_interpolated(self, sampling_frequency: float, offset_samples: int):
+        """A chunk its producer built on the grid is placed by whole samples, at any rate.
 
-        ``offset`` comes from a GPS-scale subtraction, so an exactly-aligned chunk still carries
-        cancellation error -- zero at power-of-two rates, up to 4.0e-4 samples at 4000 Hz. The
-        non-power-of-two rates here are the cases that error appears in, and they are the reason
-        the tolerance is 1e-3 rather than something tighter.
+        Its start time ``1e9 + k / f_s`` is rounded to float64, so the offset carries representation
+        error -- zero at power-of-two rates, up to 4.0e-4 samples at 4000 Hz, more than LAL's no-op
+        shift. The non-power-of-two rates here are the cases that error appears in; the declaration,
+        not the size of the fraction, is what places them verbatim.
         """
         target = self._target(offset_samples + 64, sampling_frequency=sampling_frequency)
         other = self._series(offset_samples, sampling_frequency=sampling_frequency, amplitude=2.0)
 
-        result = inject(target, other, interpolate_if_offset=False)
+        result = inject(target, other, interpolate_if_offset=False, on_grid=True)
 
         occupied = np.flatnonzero(np.asarray(result.value))
         assert occupied.size, (
@@ -1258,3 +1260,84 @@ class TestTaperedInjection:
                 fraction=OVERSAMPLING_FACTOR * (whole - offset),
             ),
         )
+
+
+class TestPlacesWholeSamples:
+    """Rounding to whole samples: within LAL's no-op shift, or on the producer's word that the series is on the grid."""
+
+    @pytest.mark.parametrize("whole", [0.0, 7.0, 1_000_000.0])
+    @pytest.mark.parametrize("sign", [1.0, -1.0])
+    def test_lals_no_op_shift_is_the_threshold(self, whole, sign):
+        """Just inside LAL's no-op shift is rounded, just outside is not, on either side of a whole sample."""
+        assert places_whole_samples(whole + sign * 0.99 * NO_OP_SHIFT_SAMPLES, 0.0, on_grid=False)
+        assert not places_whole_samples(whole + sign * 1.01 * NO_OP_SHIFT_SAMPLES, 1.0, on_grid=False)
+
+    @pytest.mark.parametrize("offset", [NO_OP_SHIFT_SAMPLES, -NO_OP_SHIFT_SAMPLES])
+    def test_an_offset_of_exactly_lals_no_op_shift_is_rounded(self, offset):
+        """LAL resamples only when ``fabs(start_sample_frac) > noop_threshold``."""
+        assert places_whole_samples(offset, 0.0, on_grid=False)
+
+    def test_lals_no_op_shift_is_lals(self):
+        """``noop_threshold`` in ``XLALSimAddInjectionREAL8TimeSeries``, LALSimulation 6.2.0."""
+        assert NO_OP_SHIFT_SAMPLES == 1e-4
+
+    def test_a_declared_series_within_the_tolerance_is_placed_whole_beyond_lals_shift(self):
+        """A declared series' representation error may exceed LAL's shift and is still rounded."""
+        assert places_whole_samples(1_000 + 4.0e-4, 1e-3, on_grid=True)
+
+    def test_a_declared_series_within_lals_shift_is_never_refused(self):
+        """Where float64 resolves less than LAL's shift (epoch 0), the shift still bounds what a declaration may carry."""
+        assert places_whole_samples(5e-5, 1e-9, on_grid=True)
+
+    @pytest.mark.parametrize("offset", [0.01, 0.5, 1_000 - 2e-3])
+    def test_a_declared_series_beyond_the_tolerance_is_refused(self, offset):
+        """A declared series further off than the tolerance contradicts its declaration."""
+        with pytest.raises(ValueError, match="declared on the grid"):
+            places_whole_samples(offset, 1e-3, on_grid=True)
+
+
+class TestPlacementAtTheCarriedTime:
+    """An undeclared series is placed at the time it carries, however close to the grid."""
+
+    RATE, EPOCH, N = 8192.0, 1e9, 2048
+
+    def _tone(self, positions):
+        """A tapered tone at 0.05 of the sample rate, in samples."""
+        return np.exp(-0.5 * ((positions - self.N / 2) / (self.N / 12)) ** 2) * np.cos(0.1 * np.pi * positions)
+
+    def test_a_series_two_ulps_off_the_grid_is_placed_there(self):
+        """A series 1/512 sample off the grid is placed 1/512 sample off the grid.
+
+        That is 0.24 µs at 8192 Hz: two float64 steps at GPS 1e9, below the 8-step resolution test,
+        and well above LAL's no-op shift. Rounding it away moved a signal by that much.
+        """
+        start = 1000
+        other_t0 = self.EPOCH + start / self.RATE + 2.0**-22
+        offset = (other_t0 - self.EPOCH) * self.RATE
+        assert offset - start == 1 / 512  # exactly: the times are representable
+        target = _series(np.zeros(4096), t0=self.EPOCH, sample_rate=self.RATE)
+        other = _series(self._tone(np.arange(self.N, dtype=float)), t0=other_t0, sample_rate=self.RATE)
+
+        written = np.asarray(inject(target, other).value)[start + 1 : start + self.N]
+
+        positions = np.arange(start + 1, start + self.N) - offset
+        assert np.max(np.abs(written - self._tone(positions))) < 1e-9
+        assert np.max(np.abs(written - self._tone(positions + 1 / 512))) > 1e-4  # where rounding put it
+
+    @pytest.mark.parametrize(("fraction", "whole"), [(5e-5, True), (2e-4, False)])
+    def test_an_offset_is_rounded_only_within_lals_no_op_shift(self, fraction, whole):
+        """At epoch 0, where float64 resolves either fraction."""
+        values = self._tone(np.arange(self.N, dtype=float))
+        target = _series(np.zeros(4096), t0=0.0, sample_rate=self.RATE)
+        other = _series(values, t0=(100 + fraction) / self.RATE, sample_rate=self.RATE)
+
+        written = np.asarray(inject(target, other).value)[100 : 100 + self.N]
+
+        assert np.array_equal(written, values) == whole
+
+    def test_a_series_declared_on_the_grid_but_off_it_is_refused(self):
+        """``inject`` refuses a declared series 0.3 samples off the grid rather than placing it."""
+        target = _series(np.zeros(4096), t0=self.EPOCH, sample_rate=self.RATE)
+        other = _series(np.ones(8), t0=self.EPOCH + 100.3 / self.RATE, sample_rate=self.RATE)
+        with pytest.raises(ValueError, match="declared on the grid"):
+            inject(target, other, on_grid=True)

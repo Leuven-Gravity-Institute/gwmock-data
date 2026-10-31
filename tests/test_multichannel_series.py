@@ -9,7 +9,13 @@ import numpy as np
 import pytest
 from astropy.units import Quantity
 
-from gwmock_data.multichannel_series import TAPERED_METADATA_KEY, MultichannelTimeSeries, MultichannelTimeSeriesList
+from gwmock_data.multichannel_series import (
+    ON_GRID_EPOCH_METADATA_KEY,
+    ON_GRID_METADATA_KEY,
+    TAPERED_METADATA_KEY,
+    MultichannelTimeSeries,
+    MultichannelTimeSeriesList,
+)
 from gwmock_data.resampling import resample_uniform_sinc
 
 
@@ -625,3 +631,202 @@ def test_a_long_chunk_off_the_grid_keeps_its_fraction_to_its_last_sample():
     k = np.arange(n - 2000, n - 200)
     want = np.cos(0.5 * np.pi * (k % 4) - 0.5 * np.pi * offset + 0.3)
     assert np.max(np.abs(np.asarray(segment[0])[k] - want)) < 1e-11
+
+
+class TestOnGridChunks:
+    """A chunk its producer built on the segments' grid is placed by whole samples; any other at its own time."""
+
+    RATE, START, AT = 3000.0, 1e9, 1000  # 1e9 + 1000 / 3000 is not representable: the offset carries rounding
+
+    def _segment(self, start=None, n=4000):
+        return MultichannelTimeSeries(
+            data=np.zeros((2, n)), start_time=self.START if start is None else start, sampling_frequency=self.RATE
+        )
+
+    def _chunk(self, *, marked, extra=0.0, n=64):
+        values = np.arange(1.0, n + 1.0)
+        chunk = MultichannelTimeSeries(
+            data=np.stack([values, -values]),
+            start_time=self.START + (self.AT + extra) / self.RATE,
+            sampling_frequency=self.RATE,
+        )
+        if marked is not None:
+            chunk.metadata[ON_GRID_METADATA_KEY] = marked
+        return chunk, values
+
+    def test_the_chunk_start_is_further_off_the_grid_than_lals_no_op_shift(self):
+        """The premise of the next two tests."""
+        chunk, _ = self._chunk(marked=None)
+        offset = (chunk.start_time.value - self.START) * self.RATE
+        assert abs(offset - self.AT) > 1e-4
+
+    def test_a_marked_chunk_is_added_sample_for_sample(self):
+        """Declared, the chunk is a plain add although its start time rounds off the grid."""
+        segment = self._segment()
+        chunk, values = self._chunk(marked=True)
+        segment.inject(chunk)
+        np.testing.assert_array_equal(np.asarray(segment[0])[self.AT : self.AT + values.size], values)
+
+    @pytest.mark.parametrize("marked", [None, "true", 1])
+    def test_an_unmarked_chunk_is_resampled_to_the_time_it_carries(self, marked, caplog):
+        """Undeclared, or not declared with ``True`` itself, the same chunk is resampled."""
+        segment = self._segment()
+        chunk, values = self._chunk(marked=marked)
+        with caplog.at_level(logging.WARNING, logger="gwmock_data"):
+            segment.inject(chunk)
+        assert "does not align" in caplog.text
+        assert not np.array_equal(np.asarray(segment[0])[self.AT : self.AT + values.size], values)
+
+    def test_a_marked_chunk_off_the_grid_is_refused(self):
+        """A chunk declared on the grid 0.3 samples off it is refused."""
+        segment = self._segment()
+        chunk, _ = self._chunk(marked=True, extra=0.3)
+        with pytest.raises(ValueError, match="declared on the grid"):
+            segment.inject(chunk)
+
+    def test_the_tail_of_a_resampled_chunk_is_marked_and_placed_whole_by_the_next_segment(self, caplog):
+        """A resampled chunk's tail is on the grid by construction, and says so.
+
+        Unmarked, the next segment would resample it a second time wherever its start time rounds
+        further off than LAL's no-op shift.
+        """
+        segment = self._segment(n=self.AT + 32)
+        chunk, _ = self._chunk(marked=None, extra=0.5)
+        tail = segment.inject(chunk)
+        assert tail is not None
+        assert tail.metadata.get(ON_GRID_METADATA_KEY) is True
+        following = self._segment(start=segment.end_time, n=4000)
+        expected = np.asarray(tail[0].data).copy()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="gwmock_data"):
+            following.inject(tail)
+        assert "does not align" not in caplog.text
+        np.testing.assert_array_equal(np.asarray(following[0])[: expected.size], expected)
+
+    def _resampled_tail(self):
+        segment = self._segment(n=self.AT + 32)
+        chunk, _ = self._chunk(marked=None, extra=0.5)
+        return segment, segment.inject(chunk)
+
+    def test_the_tail_names_the_grid_it_was_resampled_onto(self):
+        """The mark is true only of that grid, so it says which."""
+        segment, tail = self._resampled_tail()
+        assert tail.metadata[ON_GRID_EPOCH_METADATA_KEY] == float(segment.start_time.value)
+
+    def test_after_a_gap_of_half_a_sample_the_tail_is_placed_at_the_time_it_carries(self, caplog):
+        """The next segment is on another grid, so the tail is resampled there as if unmarked, not refused."""
+        segment, tail = self._resampled_tail()
+        start = float(segment.end_time.value) + 0.5 / self.RATE
+        unmarked = MultichannelTimeSeries(
+            data=np.array([np.asarray(series.data) for series in tail]),
+            start_time=tail.start_time,
+            sampling_frequency=tail.sampling_frequency,
+        )
+        expected = self._segment(start=start)
+        expected.inject(unmarked)
+        following = self._segment(start=start)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="gwmock_data"):
+            following.inject(tail)
+        assert "does not align" in caplog.text
+        np.testing.assert_array_equal(np.asarray(following[0]), np.asarray(expected[0]))
+        assert np.any(np.asarray(following[0]))
+
+    def test_after_a_gap_of_whole_samples_the_tail_is_placed_whole(self):
+        """Three samples later: the same grid, though its start rounds 1.4e-4 samples off it at 3000 Hz.
+
+        The tail starts at the previous segment's end, so its first three samples precede this one.
+        """
+        segment, tail = self._resampled_tail()
+        following = self._segment(start=float(segment.end_time.value) + 3 / self.RATE)
+        values = np.asarray(tail[0].data).copy()
+        following.inject(tail)
+        np.testing.assert_array_equal(np.asarray(following[0])[: values.size - 3], values[3:])
+
+    @pytest.mark.parametrize("where", [-5000.3, 5000.3])
+    def test_a_declared_chunk_off_the_grid_that_cannot_overlap_contributes_nothing(self, where):
+        """As ``inject`` passes it on untouched: neither locates it, so neither refuses it."""
+        segment = self._segment()
+        chunk, _ = self._chunk(marked=True, extra=where - self.AT)
+        assert segment.contributes_samples(chunk) is False
+        assert segment.inject(chunk) is chunk
+
+    def test_a_declared_chunk_off_the_grid_that_overlaps_is_refused_by_both(self):
+        """``contributes_samples`` refuses it as ``inject`` does."""
+        segment = self._segment()
+        chunk, _ = self._chunk(marked=True, extra=0.3)
+        with pytest.raises(ValueError, match="declared on the grid"):
+            segment.contributes_samples(chunk)
+
+
+class TestPlacementAtTheCarriedTimeOfAChunk:
+    """Through ``MultichannelTimeSeries.inject``: an undeclared chunk two ULPs off the grid is placed there."""
+
+    RATE, START, N, AT = 8192.0, 1e9, 2048, 1000
+
+    def _tone(self, positions):
+        return np.exp(-0.5 * ((positions - self.N / 2) / (self.N / 12)) ** 2) * np.cos(0.1 * np.pi * positions)
+
+    def test_a_chunk_1_512_sample_off_the_grid_is_placed_there(self):
+        """0.24 µs at GPS 1e9: below the 8-ULP resolution test, above LAL's no-op shift."""
+        start = self.START + self.AT / self.RATE + 2.0**-22
+        assert (start - self.START) * self.RATE - self.AT == 1 / 512
+        values = self._tone(np.arange(self.N, dtype=float))
+        segment = MultichannelTimeSeries(data=np.zeros((2, 4096)), start_time=self.START, sampling_frequency=self.RATE)
+        chunk = MultichannelTimeSeries(data=np.stack([values, -values]), start_time=start, sampling_frequency=self.RATE)
+
+        segment.inject(chunk)
+
+        covered = np.arange(self.AT + 1, self.AT + self.N)
+        positions = covered - self.AT - 1 / 512
+        for channel, scale in enumerate((1.0, -1.0)):
+            written = np.asarray(segment[channel])[covered]
+            assert np.max(np.abs(written - scale * self._tone(positions))) < 1e-9
+            assert np.max(np.abs(written - scale * self._tone(positions + 1 / 512))) > 1e-4
+
+
+class TestTheTailOfAChunkPlacedWhole:
+    """A chunk rounded onto a segment within LAL's no-op shift continues, in its tail, the way it began."""
+
+    RATE, START = 3000.0, 1e9
+
+    def test_the_tail_is_marked_and_placed_whole_by_the_next_segment(self, caplog):
+        """A chunk rounded onto a segment is continued by its tail the same way.
+
+        The chunk starts within LAL's shift of the grid, so it is rounded. Its tail starts 3.6e-4 samples
+        off the next segment's grid (one float64 step at GPS 1e9 is 3.6e-4 samples at 3000 Hz); unmarked,
+        it would be resampled there, the rest of one signal placed by a different rule from its start.
+        """
+        at = 10
+        segment = MultichannelTimeSeries(
+            data=np.zeros((1, at + 32)), start_time=self.START, sampling_frequency=self.RATE
+        )
+        values = np.arange(1.0, 65.0)
+        chunk = MultichannelTimeSeries(
+            data=values[np.newaxis], start_time=self.START + at / self.RATE, sampling_frequency=self.RATE
+        )
+        offset = (chunk.start_time.value - self.START) * self.RATE
+        assert abs(offset - at) <= 1e-4
+        tail = segment.inject(chunk)
+        np.testing.assert_array_equal(np.asarray(segment[0])[at:], values[:32])
+        assert tail.metadata.get(ON_GRID_METADATA_KEY) is True
+        assert tail.metadata[ON_GRID_EPOCH_METADATA_KEY] == self.START
+        assert abs((tail.start_time.value - segment.end_time.value) * self.RATE) > 1e-4
+        following = MultichannelTimeSeries(
+            data=np.zeros((1, 64)), start_time=segment.end_time, sampling_frequency=self.RATE
+        )
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="gwmock_data"):
+            following.inject(tail)
+        assert "does not align" not in caplog.text
+        np.testing.assert_array_equal(np.asarray(following[0])[:32], values[32:])
+
+    def test_a_tail_within_lals_shift_near_epoch_zero_is_not_refused(self):
+        """At epoch 0 float64 resolves 1e-9 samples, below the shift a marked tail may legitimately carry."""
+        rate = 16.0
+        segment = MultichannelTimeSeries(data=np.zeros((1, 16)), start_time=0.0, sampling_frequency=rate)
+        chunk = MultichannelTimeSeries(data=np.ones((1, 32)), start_time=(4 + 5e-5) / rate, sampling_frequency=rate)
+        tail = segment.inject(chunk)
+        following = MultichannelTimeSeries(data=np.zeros((1, 32)), start_time=segment.end_time, sampling_frequency=rate)
+        following.inject(tail)
+        np.testing.assert_array_equal(np.asarray(following[0])[:20], np.ones(20))

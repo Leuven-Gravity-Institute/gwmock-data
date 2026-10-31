@@ -21,9 +21,11 @@ logger = logging.getLogger("gwmock_data")
 #: numerical resolution encoded in two packages, and gwmock-signal's value is the older of the two,
 #: so this defers to it rather than leaving the pair to disagree by a factor of two.
 #:
-#: It is comfortably above the largest error measured for a genuinely aligned chunk here (4.0e-4
+#: It is comfortably above the largest error measured for a chunk built on the grid here (4.0e-4
 #: samples at GPS 1.577e9, 4000 Hz) and, via the ceiling below, still far under the half sample that
-#: would make everything look aligned.
+#: would make everything look aligned. It bounds how far a series declared on the grid may sit off it
+#: (:func:`places_whole_samples`); it does not decide placement: a fraction this small is a genuine
+#: offset in any series that is not declared, two ULPs being 0.24 µs at GPS 1e9.
 _ALIGNMENT_SPACING_MARGIN = 8.0
 
 #: Smallest tolerance ever used, for epochs near zero where the spacing is meaningless.
@@ -90,6 +92,10 @@ def alignment_tolerance(
 def is_aligned(offset_samples: float, tolerance: float) -> bool:
     """Return whether *offset_samples* is a whole number of samples, within *tolerance*.
 
+    This is the float64-resolution test: whether a time can be a grid sample at all. Whether a series
+    is *placed* by whole samples is :func:`places_whole_samples`, which applies it only to a series
+    declared on the grid.
+
     Absolute, not relative. ``np.isclose``'s default tolerance is relative, and since a fractional
     offset can never exceed 0.5 samples, a relative test passes unconditionally once
     ``rtol * offset >= 0.5`` -- about 50,000 samples, or 12 s into a segment at 4096 Hz. Beyond that
@@ -104,6 +110,49 @@ def is_aligned(offset_samples: float, tolerance: float) -> bool:
         Whether the offset counts as aligned.
     """
     return bool(abs(offset_samples - round(offset_samples)) <= tolerance)
+
+
+#: Fraction of a sample up to which an offset is placed by whole samples rather than resampled:
+#: LALSimulation's ``noop_threshold`` in ``XLALSimAddInjectionREAL8TimeSeries`` (``LALSimulation.c``).
+#: Rounding moves the signal by at most this much, 12 ns at 8192 Hz.
+NO_OP_SHIFT_SAMPLES = 1e-4
+
+
+def places_whole_samples(offset_samples: float, tolerance: float, *, on_grid: bool) -> bool:
+    """Return whether a series starting *offset_samples* into a grid is placed by whole samples.
+
+    A series is placed at the time it carries. Its offset is rounded to whole samples only when the
+    rounding moves it by no more than :data:`NO_OP_SHIFT_SAMPLES`, as LALSimulation does; anything larger
+    is resampled. A float64 GPS time cannot say on its own whether a few-ULP offset is genuine or the
+    rounding of arithmetic that meant to land on the grid: a coalescence time two ULPs off the grid is
+    a real 0.24 µs at GPS 1e9, while ``epoch + k / 4000`` misses its sample by up to 2.3e-4 samples.
+    Only the series' producer knows which, so it says so with *on_grid*.
+
+    Args:
+        offset_samples: Offset of the series' first sample on the grid, in samples.
+        tolerance: The float64 resolution of the times involved, from :func:`alignment_tolerance`.
+        on_grid: Whether the producer built the series on this grid, so that any fraction is the
+            rounding of its timestamps. It is then placed by whole samples.
+
+    Returns:
+        Whether to place by whole samples.
+
+    Raises:
+        ValueError: If *on_grid* is set but the offset is further from a whole sample than both
+            *tolerance* and :data:`NO_OP_SHIFT_SAMPLES`: the series is not on this grid, whatever its
+            producer intended.
+    """
+    fraction = abs(offset_samples - round(offset_samples))
+    if fraction <= NO_OP_SHIFT_SAMPLES:
+        return True
+    if on_grid:
+        if fraction > tolerance:
+            raise ValueError(
+                f"A series declared on the grid starts {fraction:.3e} samples off it, beyond both the "
+                f"{tolerance:.3e} its timestamps' float64 resolution allows and LAL's no-op shift."
+            )
+        return True
+    return False
 
 
 def measure_content_before(
@@ -196,13 +245,20 @@ def units_are_compatible(target_unit: str | None, other_unit: str | None) -> boo
 
 
 def inject(
-    timeseries: TimeSeries, other: TimeSeries, interpolate_if_offset: bool = True, *, tapered: bool = False
+    timeseries: TimeSeries,
+    other: TimeSeries,
+    interpolate_if_offset: bool = True,
+    *,
+    tapered: bool = False,
+    on_grid: bool = False,
 ) -> TimeSeries:
     """Add *other* into *timeseries* where the two overlap, and return the sum.
 
     Placement is by sample index on *timeseries*' grid. The offset of *other*'s first sample is
-    ``(other.t0 - timeseries.t0) * sample_rate`` samples; when that is a whole number to within
-    :func:`alignment_tolerance`, the overlapping samples are added one for one. Samples of *other*
+    ``(other.t0 - timeseries.t0) * sample_rate`` samples; the overlapping samples are added one for
+    one when that is within :data:`NO_OP_SHIFT_SAMPLES` of a whole number, as LALSimulation places
+    them, or when *other* is declared on the grid (``on_grid``) and it is a whole number to within
+    :func:`alignment_tolerance` (:func:`places_whole_samples`). Samples of *other*
     outside *timeseries*' span are not placed: those before it are lost (the caller reports them,
     see :func:`measure_content_before`), and those after it are the caller's to carry forward.
 
@@ -229,13 +285,16 @@ def inject(
         tapered: Whether *other* is a whole signal that falls smoothly to zero at both ends, so it can
             be oversampled exactly before resampling. Leave it False for a chunk cut from a longer
             signal.
+        on_grid: Whether *other* was built on *timeseries*' grid, so that any fraction of a sample in
+            its offset is the rounding of its timestamps and not a time it means to carry.
 
     Returns:
         A new series with *timeseries*' timing, name and unit, holding the sum.
 
     Raises:
         ValueError: If the sample rates or the units are incompatible (see
-            :func:`units_are_compatible`), or either series is not one-dimensional.
+            :func:`units_are_compatible`), either series is not one-dimensional, or *other* is
+            declared on the grid but starts further off it than its timestamps' resolution allows.
     """
     if not units_are_compatible(timeseries.unit, other.unit):
         raise ValueError(f"Cannot inject a series in {other.unit!r} into one in {timeseries.unit!r}.")
@@ -261,7 +320,7 @@ def inject(
     )
     injected_data = np.array(timeseries.data, dtype=np.result_type(timeseries.data, other.data), copy=True)
 
-    if is_aligned(offset, tolerance):
+    if places_whole_samples(offset, tolerance, on_grid=on_grid):
         shift = round(offset)
         logger.debug("Injecting with aligned grids (offset: %s samples)", shift)
         first = max(shift, 0)
