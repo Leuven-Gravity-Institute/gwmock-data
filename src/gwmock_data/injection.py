@@ -138,18 +138,21 @@ def places_whole_samples(offset_samples: float, tolerance: float, *, on_grid: bo
         Whether to place by whole samples.
 
     Raises:
-        ValueError: If *on_grid* is set but the offset is further from a whole sample than
-            *tolerance*: the series is not on this grid, whatever its producer intended.
+        ValueError: If *on_grid* is set but the offset is further from a whole sample than both
+            *tolerance* and :data:`NO_OP_SHIFT_SAMPLES`: the series is not on this grid, whatever its
+            producer intended.
     """
     fraction = abs(offset_samples - round(offset_samples))
+    if fraction <= NO_OP_SHIFT_SAMPLES:
+        return True
     if on_grid:
         if fraction > tolerance:
             raise ValueError(
-                f"A series declared on the grid starts {fraction:.3e} samples off it, beyond the "
-                f"{tolerance:.3e} its timestamps' float64 resolution allows."
+                f"A series declared on the grid starts {fraction:.3e} samples off it, beyond both the "
+                f"{tolerance:.3e} its timestamps' float64 resolution allows and LAL's no-op shift."
             )
         return True
-    return fraction <= NO_OP_SHIFT_SAMPLES
+    return False
 
 
 def measure_content_before(

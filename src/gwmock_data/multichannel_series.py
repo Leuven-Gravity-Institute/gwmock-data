@@ -34,8 +34,8 @@ TAPERED_METADATA_KEY = "gwmock_data.tapered"
 #: its value must be ``True`` itself. Such a chunk is placed by whole samples, and one further off the grid
 #: than that rounding allows is refused (``gwmock_data.injection.places_whole_samples``). Any other chunk is
 #: placed at the time it carries: by whole samples only within ``NO_OP_SHIFT_SAMPLES`` of the grid, as
-#: LALSimulation places an injection, and otherwise resampled. A chunk resampled onto a segment's grid is
-#: on it by construction, so the tail it returns is marked, with that grid named by
+#: LALSimulation places an injection, and otherwise resampled. Whole or resampled, a chunk placed in a segment
+#: is then on that segment's grid, so the tail it returns is marked, with that grid named by
 #: :data:`ON_GRID_EPOCH_METADATA_KEY`.
 ON_GRID_METADATA_KEY = "gwmock_data.on_grid"
 
@@ -301,8 +301,9 @@ class MultichannelTimeSeries:
             What this segment could not place, for the next segment. *other* itself, unchanged, if
             it ends before this segment starts or starts after it ends, in which case nothing is
             injected. Otherwise the part of the chunk past this segment's end, if it extends beyond
-            it; for an off-grid chunk that is the resampled series, on this segment's grid, carrying
-            *other*'s metadata, channel names and units, and marked on the grid. ``None`` if the chunk ends within this
+            it; for an off-grid chunk that is the resampled series, on this segment's grid. Either way
+            it carries *other*'s metadata, channel names and units, and is marked on this segment's
+            grid (:data:`ON_GRID_METADATA_KEY`, :data:`ON_GRID_EPOCH_METADATA_KEY`). ``None`` if the chunk ends within this
             segment, or if it is an off-grid chunk whose sample span contains no grid point at all
             (a single sample between two grid points), in which case nothing is injected and a
             warning is logged.
@@ -419,9 +420,10 @@ class MultichannelTimeSeries:
             # `injection_parameters` -- and the channel name and unit -- from any injection long
             # enough to cross a boundary, which is precisely the long-inspiral case.
             tail.metadata.update(dict(supplied.metadata))
-            if other is not supplied:  # resampled onto this segment's grid, which the next one continues
-                tail.metadata[ON_GRID_METADATA_KEY] = True
-                tail.metadata[ON_GRID_EPOCH_METADATA_KEY] = float(self.start_time.to_value("s"))
+            # Placed on this segment's grid, whole or resampled, so the next segment continuing that grid
+            # places the rest the same way however the tail's start rounds.
+            tail.metadata[ON_GRID_METADATA_KEY] = True
+            tail.metadata[ON_GRID_EPOCH_METADATA_KEY] = float(self.start_time.to_value("s"))
             for index in range(min(tail.num_of_channels, supplied.num_of_channels)):
                 source = supplied[index]
                 tail._data[index] = dataclasses.replace(tail[index], name=source.name, unit=source.unit)

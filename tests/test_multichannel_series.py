@@ -783,3 +783,50 @@ class TestPlacementAtTheCarriedTimeOfAChunk:
             written = np.asarray(segment[channel])[covered]
             assert np.max(np.abs(written - scale * self._tone(positions))) < 1e-9
             assert np.max(np.abs(written - scale * self._tone(positions + 1 / 512))) > 1e-4
+
+
+class TestTheTailOfAChunkPlacedWhole:
+    """A chunk rounded onto a segment within LAL's no-op shift continues, in its tail, the way it began."""
+
+    RATE, START = 3000.0, 1e9
+
+    def test_the_tail_is_marked_and_placed_whole_by_the_next_segment(self, caplog):
+        """A chunk rounded onto a segment is continued by its tail the same way.
+
+        The chunk starts within LAL's shift of the grid, so it is rounded. Its tail starts 3.6e-4 samples
+        off the next segment's grid (one float64 step at GPS 1e9 is 3.6e-4 samples at 3000 Hz); unmarked,
+        it would be resampled there, the rest of one signal placed by a different rule from its start.
+        """
+        at = 10
+        segment = MultichannelTimeSeries(
+            data=np.zeros((1, at + 32)), start_time=self.START, sampling_frequency=self.RATE
+        )
+        values = np.arange(1.0, 65.0)
+        chunk = MultichannelTimeSeries(
+            data=values[np.newaxis], start_time=self.START + at / self.RATE, sampling_frequency=self.RATE
+        )
+        offset = (chunk.start_time.value - self.START) * self.RATE
+        assert abs(offset - at) <= 1e-4
+        tail = segment.inject(chunk)
+        np.testing.assert_array_equal(np.asarray(segment[0])[at:], values[:32])
+        assert tail.metadata.get(ON_GRID_METADATA_KEY) is True
+        assert tail.metadata[ON_GRID_EPOCH_METADATA_KEY] == self.START
+        assert abs((tail.start_time.value - segment.end_time.value) * self.RATE) > 1e-4
+        following = MultichannelTimeSeries(
+            data=np.zeros((1, 64)), start_time=segment.end_time, sampling_frequency=self.RATE
+        )
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="gwmock_data"):
+            following.inject(tail)
+        assert "does not align" not in caplog.text
+        np.testing.assert_array_equal(np.asarray(following[0])[:32], values[32:])
+
+    def test_a_tail_within_lals_shift_near_epoch_zero_is_not_refused(self):
+        """At epoch 0 float64 resolves 1e-9 samples, below the shift a marked tail may legitimately carry."""
+        rate = 16.0
+        segment = MultichannelTimeSeries(data=np.zeros((1, 16)), start_time=0.0, sampling_frequency=rate)
+        chunk = MultichannelTimeSeries(data=np.ones((1, 32)), start_time=(4 + 5e-5) / rate, sampling_frequency=rate)
+        tail = segment.inject(chunk)
+        following = MultichannelTimeSeries(data=np.zeros((1, 32)), start_time=segment.end_time, sampling_frequency=rate)
+        following.inject(tail)
+        np.testing.assert_array_equal(np.asarray(following[0])[:20], np.ones(20))

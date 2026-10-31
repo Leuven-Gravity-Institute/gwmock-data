@@ -1285,6 +1285,10 @@ class TestPlacesWholeSamples:
         """A declared series' representation error may exceed LAL's shift and is still rounded."""
         assert places_whole_samples(1_000 + 4.0e-4, 1e-3, on_grid=True)
 
+    def test_a_declared_series_within_lals_shift_is_never_refused(self):
+        """Where float64 resolves less than LAL's shift (epoch 0), the shift still bounds what a declaration may carry."""
+        assert places_whole_samples(5e-5, 1e-9, on_grid=True)
+
     @pytest.mark.parametrize("offset", [0.01, 0.5, 1_000 - 2e-3])
     def test_a_declared_series_beyond_the_tolerance_is_refused(self, offset):
         """A declared series further off than the tolerance contradicts its declaration."""
