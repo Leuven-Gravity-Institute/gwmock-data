@@ -9,7 +9,12 @@ import numpy as np
 import pytest
 from astropy.units import Quantity
 
-from gwmock_data.multichannel_series import TAPERED_METADATA_KEY, MultichannelTimeSeries, MultichannelTimeSeriesList
+from gwmock_data.multichannel_series import (
+    ON_GRID_METADATA_KEY,
+    TAPERED_METADATA_KEY,
+    MultichannelTimeSeries,
+    MultichannelTimeSeriesList,
+)
 from gwmock_data.resampling import resample_uniform_sinc
 
 
@@ -625,3 +630,74 @@ def test_a_long_chunk_off_the_grid_keeps_its_fraction_to_its_last_sample():
     k = np.arange(n - 2000, n - 200)
     want = np.cos(0.5 * np.pi * (k % 4) - 0.5 * np.pi * offset + 0.3)
     assert np.max(np.abs(np.asarray(segment[0])[k] - want)) < 1e-11
+
+
+class TestOnGridChunks:
+    """A chunk its producer built on the segments' grid is placed by whole samples; any other at its own time."""
+
+    RATE, START, AT = 3000.0, 1e9, 1000  # 1e9 + 1000 / 3000 is not representable: the offset carries rounding
+
+    def _segment(self, start=None, n=4000):
+        return MultichannelTimeSeries(
+            data=np.zeros((2, n)), start_time=self.START if start is None else start, sampling_frequency=self.RATE
+        )
+
+    def _chunk(self, *, marked, extra=0.0, n=64):
+        values = np.arange(1.0, n + 1.0)
+        chunk = MultichannelTimeSeries(
+            data=np.stack([values, -values]),
+            start_time=self.START + (self.AT + extra) / self.RATE,
+            sampling_frequency=self.RATE,
+        )
+        if marked is not None:
+            chunk.metadata[ON_GRID_METADATA_KEY] = marked
+        return chunk, values
+
+    def test_the_chunk_start_is_further_off_the_grid_than_lals_no_op_shift(self):
+        """The premise of the next two tests."""
+        chunk, _ = self._chunk(marked=None)
+        offset = (chunk.start_time.value - self.START) * self.RATE
+        assert abs(offset - self.AT) > 1e-4
+
+    def test_a_marked_chunk_is_added_sample_for_sample(self):
+        """Declared, the chunk is a plain add although its start time rounds off the grid."""
+        segment = self._segment()
+        chunk, values = self._chunk(marked=True)
+        segment.inject(chunk)
+        np.testing.assert_array_equal(np.asarray(segment[0])[self.AT : self.AT + values.size], values)
+
+    @pytest.mark.parametrize("marked", [None, "true", 1])
+    def test_an_unmarked_chunk_is_resampled_to_the_time_it_carries(self, marked, caplog):
+        """Undeclared, or not declared with ``True`` itself, the same chunk is resampled."""
+        segment = self._segment()
+        chunk, values = self._chunk(marked=marked)
+        with caplog.at_level(logging.WARNING, logger="gwmock_data"):
+            segment.inject(chunk)
+        assert "does not align" in caplog.text
+        assert not np.array_equal(np.asarray(segment[0])[self.AT : self.AT + values.size], values)
+
+    def test_a_marked_chunk_off_the_grid_is_refused(self):
+        """A chunk declared on the grid 0.3 samples off it is refused."""
+        segment = self._segment()
+        chunk, _ = self._chunk(marked=True, extra=0.3)
+        with pytest.raises(ValueError, match="declared on the grid"):
+            segment.inject(chunk)
+
+    def test_the_tail_of_a_resampled_chunk_is_marked_and_placed_whole_by_the_next_segment(self, caplog):
+        """A resampled chunk's tail is on the grid by construction, and says so.
+
+        Unmarked, the next segment would resample it a second time wherever its start time rounds
+        further off than LAL's no-op shift.
+        """
+        segment = self._segment(n=self.AT + 32)
+        chunk, _ = self._chunk(marked=None, extra=0.5)
+        tail = segment.inject(chunk)
+        assert tail is not None
+        assert tail.metadata.get(ON_GRID_METADATA_KEY) is True
+        following = self._segment(start=segment.end_time, n=4000)
+        expected = np.asarray(tail[0].data).copy()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="gwmock_data"):
+            following.inject(tail)
+        assert "does not align" not in caplog.text
+        np.testing.assert_array_equal(np.asarray(following[0])[: expected.size], expected)
