@@ -112,7 +112,7 @@ def is_aligned(offset_samples: float, tolerance: float) -> bool:
     return bool(abs(offset_samples - round(offset_samples)) <= tolerance)
 
 
-#: Fraction of a sample below which an offset is placed by whole samples rather than resampled:
+#: Fraction of a sample up to which an offset is placed by whole samples rather than resampled:
 #: LALSimulation's ``noop_threshold`` in ``XLALSimAddInjectionREAL8TimeSeries`` (``LALSimulation.c``).
 #: Rounding moves the signal by at most this much, 12 ns at 8192 Hz.
 NO_OP_SHIFT_SAMPLES = 1e-4
@@ -122,7 +122,7 @@ def places_whole_samples(offset_samples: float, tolerance: float, *, on_grid: bo
     """Return whether a series starting *offset_samples* into a grid is placed by whole samples.
 
     A series is placed at the time it carries. Its offset is rounded to whole samples only when the
-    rounding moves it by less than :data:`NO_OP_SHIFT_SAMPLES`, as LALSimulation does; anything larger
+    rounding moves it by no more than :data:`NO_OP_SHIFT_SAMPLES`, as LALSimulation does; anything larger
     is resampled. A float64 GPS time cannot say on its own whether a few-ULP offset is genuine or the
     rounding of arithmetic that meant to land on the grid: a coalescence time two ULPs off the grid is
     a real 0.24 µs at GPS 1e9, while ``epoch + k / 4000`` misses its sample by up to 2.3e-4 samples.
@@ -149,7 +149,7 @@ def places_whole_samples(offset_samples: float, tolerance: float, *, on_grid: bo
                 f"{tolerance:.3e} its timestamps' float64 resolution allows."
             )
         return True
-    return fraction < NO_OP_SHIFT_SAMPLES
+    return fraction <= NO_OP_SHIFT_SAMPLES
 
 
 def measure_content_before(

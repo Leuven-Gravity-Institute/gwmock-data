@@ -1272,6 +1272,11 @@ class TestPlacesWholeSamples:
         assert places_whole_samples(whole + sign * 0.99 * NO_OP_SHIFT_SAMPLES, 0.0, on_grid=False)
         assert not places_whole_samples(whole + sign * 1.01 * NO_OP_SHIFT_SAMPLES, 1.0, on_grid=False)
 
+    @pytest.mark.parametrize("offset", [NO_OP_SHIFT_SAMPLES, -NO_OP_SHIFT_SAMPLES])
+    def test_an_offset_of_exactly_lals_no_op_shift_is_rounded(self, offset):
+        """LAL resamples only when ``fabs(start_sample_frac) > noop_threshold``."""
+        assert places_whole_samples(offset, 0.0, on_grid=False)
+
     def test_lals_no_op_shift_is_lals(self):
         """``noop_threshold`` in ``XLALSimAddInjectionREAL8TimeSeries``, LALSimulation 6.2.0."""
         assert NO_OP_SHIFT_SAMPLES == 1e-4

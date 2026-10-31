@@ -10,6 +10,7 @@ import pytest
 from astropy.units import Quantity
 
 from gwmock_data.multichannel_series import (
+    ON_GRID_EPOCH_METADATA_KEY,
     ON_GRID_METADATA_KEY,
     TAPERED_METADATA_KEY,
     MultichannelTimeSeries,
@@ -701,3 +702,84 @@ class TestOnGridChunks:
             following.inject(tail)
         assert "does not align" not in caplog.text
         np.testing.assert_array_equal(np.asarray(following[0])[: expected.size], expected)
+
+    def _resampled_tail(self):
+        segment = self._segment(n=self.AT + 32)
+        chunk, _ = self._chunk(marked=None, extra=0.5)
+        return segment, segment.inject(chunk)
+
+    def test_the_tail_names_the_grid_it_was_resampled_onto(self):
+        """The mark is true only of that grid, so it says which."""
+        segment, tail = self._resampled_tail()
+        assert tail.metadata[ON_GRID_EPOCH_METADATA_KEY] == float(segment.start_time.value)
+
+    def test_after_a_gap_of_half_a_sample_the_tail_is_placed_at_the_time_it_carries(self, caplog):
+        """The next segment is on another grid, so the tail is resampled there as if unmarked, not refused."""
+        segment, tail = self._resampled_tail()
+        start = float(segment.end_time.value) + 0.5 / self.RATE
+        unmarked = MultichannelTimeSeries(
+            data=np.array([np.asarray(series.data) for series in tail]),
+            start_time=tail.start_time,
+            sampling_frequency=tail.sampling_frequency,
+        )
+        expected = self._segment(start=start)
+        expected.inject(unmarked)
+        following = self._segment(start=start)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="gwmock_data"):
+            following.inject(tail)
+        assert "does not align" in caplog.text
+        np.testing.assert_array_equal(np.asarray(following[0]), np.asarray(expected[0]))
+        assert np.any(np.asarray(following[0]))
+
+    def test_after_a_gap_of_whole_samples_the_tail_is_placed_whole(self):
+        """Three samples later: the same grid, though its start rounds 1.4e-4 samples off it at 3000 Hz.
+
+        The tail starts at the previous segment's end, so its first three samples precede this one.
+        """
+        segment, tail = self._resampled_tail()
+        following = self._segment(start=float(segment.end_time.value) + 3 / self.RATE)
+        values = np.asarray(tail[0].data).copy()
+        following.inject(tail)
+        np.testing.assert_array_equal(np.asarray(following[0])[: values.size - 3], values[3:])
+
+    @pytest.mark.parametrize("where", [-5000.3, 5000.3])
+    def test_a_declared_chunk_off_the_grid_that_cannot_overlap_contributes_nothing(self, where):
+        """As ``inject`` passes it on untouched: neither locates it, so neither refuses it."""
+        segment = self._segment()
+        chunk, _ = self._chunk(marked=True, extra=where - self.AT)
+        assert segment.contributes_samples(chunk) is False
+        assert segment.inject(chunk) is chunk
+
+    def test_a_declared_chunk_off_the_grid_that_overlaps_is_refused_by_both(self):
+        """``contributes_samples`` refuses it as ``inject`` does."""
+        segment = self._segment()
+        chunk, _ = self._chunk(marked=True, extra=0.3)
+        with pytest.raises(ValueError, match="declared on the grid"):
+            segment.contributes_samples(chunk)
+
+
+class TestPlacementAtTheCarriedTimeOfAChunk:
+    """Through ``MultichannelTimeSeries.inject``: an undeclared chunk two ULPs off the grid is placed there."""
+
+    RATE, START, N, AT = 8192.0, 1e9, 2048, 1000
+
+    def _tone(self, positions):
+        return np.exp(-0.5 * ((positions - self.N / 2) / (self.N / 12)) ** 2) * np.cos(0.1 * np.pi * positions)
+
+    def test_a_chunk_1_512_sample_off_the_grid_is_placed_there(self):
+        """0.24 µs at GPS 1e9: below the 8-ULP resolution test, above LAL's no-op shift."""
+        start = self.START + self.AT / self.RATE + 2.0**-22
+        assert (start - self.START) * self.RATE - self.AT == 1 / 512
+        values = self._tone(np.arange(self.N, dtype=float))
+        segment = MultichannelTimeSeries(data=np.zeros((2, 4096)), start_time=self.START, sampling_frequency=self.RATE)
+        chunk = MultichannelTimeSeries(data=np.stack([values, -values]), start_time=start, sampling_frequency=self.RATE)
+
+        segment.inject(chunk)
+
+        covered = np.arange(self.AT + 1, self.AT + self.N)
+        positions = covered - self.AT - 1 / 512
+        for channel, scale in enumerate((1.0, -1.0)):
+            written = np.asarray(segment[channel])[covered]
+            assert np.max(np.abs(written - scale * self._tone(positions))) < 1e-9
+            assert np.max(np.abs(written - scale * self._tone(positions + 1 / 512))) > 1e-4

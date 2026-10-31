@@ -12,7 +12,7 @@ from typing import Any, cast, overload
 import numpy as np
 from astropy.units import Quantity
 
-from gwmock_data.injection import alignment_tolerance, inject, measure_content_before, places_whole_samples
+from gwmock_data.injection import alignment_tolerance, inject, is_aligned, measure_content_before, places_whole_samples
 from gwmock_data.resampling import OVERSAMPLING_FACTOR, oversample_fourier, resample_uniform_sinc
 from gwmock_data.timeseries import TimeSeries as ChannelSeries
 from gwmock_data.timeseries import as_timeseries
@@ -35,8 +35,15 @@ TAPERED_METADATA_KEY = "gwmock_data.tapered"
 #: than that rounding allows is refused (``gwmock_data.injection.places_whole_samples``). Any other chunk is
 #: placed at the time it carries: by whole samples only within ``NO_OP_SHIFT_SAMPLES`` of the grid, as
 #: LALSimulation places an injection, and otherwise resampled. A chunk resampled onto a segment's grid is
-#: on it by construction, so the tail it returns is marked.
+#: on it by construction, so the tail it returns is marked, with that grid named by
+#: :data:`ON_GRID_EPOCH_METADATA_KEY`.
 ON_GRID_METADATA_KEY = "gwmock_data.on_grid"
+
+#: Optional companion of :data:`ON_GRID_METADATA_KEY`: the GPS time, in seconds, of one sample of the grid
+#: the chunk was built on. A segment whose own grid is not that one -- after a gap that is not a whole number
+#: of samples -- places the chunk at the time it carries, as if it were not marked. Without it, the mark
+#: claims the grid of every segment the chunk meets.
+ON_GRID_EPOCH_METADATA_KEY = "gwmock_data.on_grid_epoch"
 
 
 def _in_unit(value: float | Quantity, unit: str) -> float:
@@ -389,7 +396,7 @@ class MultichannelTimeSeries:
 
         # A chunk resampled above is on this grid by construction, so it is placed by whole samples however
         # its start time rounds, as a declared one is; any other aligned chunk is within LAL's no-op shift.
-        on_grid = other is not supplied or supplied.metadata.get(ON_GRID_METADATA_KEY) is True
+        on_grid = other is not supplied or self._declared_on_grid(supplied)
         for i in range(self.num_of_channels):
             self[i] = inject(self[i], other[i], on_grid=on_grid)
         # Its samples now hold more than the producer's whole signal, so it is no longer one.
@@ -414,6 +421,7 @@ class MultichannelTimeSeries:
             tail.metadata.update(dict(supplied.metadata))
             if other is not supplied:  # resampled onto this segment's grid, which the next one continues
                 tail.metadata[ON_GRID_METADATA_KEY] = True
+                tail.metadata[ON_GRID_EPOCH_METADATA_KEY] = float(self.start_time.to_value("s"))
             for index in range(min(tail.num_of_channels, supplied.num_of_channels)):
                 source = supplied[index]
                 tail._data[index] = dataclasses.replace(tail[index], name=source.name, unit=source.unit)
@@ -507,10 +515,25 @@ class MultichannelTimeSeries:
             self.sampling_frequency.value,
             gps_times=(other_start_time.value, other.end_time.to(unit).value),
         )
-        aligned = places_whole_samples(offset, tolerance, on_grid=other.metadata.get(ON_GRID_METADATA_KEY) is True)
+        aligned = places_whole_samples(offset, tolerance, on_grid=self._declared_on_grid(other))
         if aligned:
             offset = float(round(offset))
         return offset, aligned, math.ceil(offset), math.floor(offset + len(other.time_array) - 1)
+
+    def _declared_on_grid(self, other: MultichannelTimeSeries) -> bool:
+        """Whether *other* is declared on this segment's grid (:data:`ON_GRID_METADATA_KEY`).
+
+        A mark naming its grid (:data:`ON_GRID_EPOCH_METADATA_KEY`) declares only that grid: on a segment
+        whose start is not a whole number of that grid's samples from the named epoch, it does not apply.
+        """
+        if other.metadata.get(ON_GRID_METADATA_KEY) is not True:
+            return False
+        epoch = other.metadata.get(ON_GRID_EPOCH_METADATA_KEY)
+        if epoch is None:
+            return True
+        start = float(self.start_time.to_value("s"))
+        rate = float(self.sampling_frequency.to_value("Hz"))
+        return is_aligned((start - float(epoch)) * rate, alignment_tolerance(float(epoch), rate, gps_times=(start,)))
 
     def contributes_samples(self, other: MultichannelTimeSeries) -> bool:
         """Whether injecting *other* into this segment would place at least one sample.
@@ -538,7 +561,15 @@ class MultichannelTimeSeries:
 
         Returns:
             ``True`` if injecting the chunk would place at least one sample in this segment.
+
+        Raises:
+            ValueError: As :meth:`inject`, if an overlapping chunk is declared on this grid but starts
+                further off it than its timestamps' float64 resolution allows.
         """
+        # The checks :meth:`inject` makes before it locates a chunk, in the same order, so a chunk it would
+        # pass on untouched is answered here without being located either.
+        if other.end_time < self.start_time or other.start_time > self.end_time:
+            return False
         _, _, first, last = self._grid_span(other)
         return max(first, 0) <= min(last, len(self.time_array) - 1)
 
