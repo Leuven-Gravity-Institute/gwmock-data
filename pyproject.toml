@@ -28,11 +28,11 @@ dependencies = [
 
 [project.optional-dependencies]
 # HDF5 through h5py rather than the built-in writer and pyfive: faster, and gzip-compressed datasets.
-hdf5 = ["h5py>=3.12"]
+hdf5 = ["h5py>=3.13.0"]
 # Conversion to and from GWpy series.
 gwpy = ["gwpy>=4.0.0"]
 # Conversion to and from PyCBC series.
-pycbc = ["pycbc>=2.6.0"]
+pycbc = ["pycbc>=2.8.0"]
 # JAX-backed samples.
 jax = ["jax>=0.5.0"]
 
