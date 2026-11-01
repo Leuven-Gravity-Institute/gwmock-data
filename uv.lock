@@ -806,10 +806,10 @@ release = [
 requires-dist = [
     { name = "astropy", specifier = ">=7.0" },
     { name = "gwpy", marker = "extra == 'gwpy'", specifier = ">=4.0.0" },
-    { name = "h5py", marker = "extra == 'hdf5'", specifier = ">=3.12" },
+    { name = "h5py", marker = "extra == 'hdf5'", specifier = ">=3.13.0" },
     { name = "jax", marker = "extra == 'jax'", specifier = ">=0.5.0" },
     { name = "numpy", specifier = ">=2.2" },
-    { name = "pycbc", marker = "extra == 'pycbc'", specifier = ">=2.6.0" },
+    { name = "pycbc", marker = "extra == 'pycbc'", specifier = ">=2.8.0" },
     { name = "pyfive", specifier = ">=1.2.1" },
 ]
 provides-extras = ["gwpy", "hdf5", "jax", "pycbc"]
