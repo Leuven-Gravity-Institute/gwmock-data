@@ -426,3 +426,19 @@ def test_oversampling_refuses_more_than_one_dimension() -> None:
     """One channel at a time, like the kernel."""
     with pytest.raises(ValueError, match="one-dimensional"):
         oversample_fourier(np.ones((2, 4)))
+
+
+def test_a_beta_without_a_polynomial_window_keeps_the_exact_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where no polynomial reaches the window's accuracy target, the kernel evaluates ``i0`` itself.
+
+    Reached in ordinary use only above beta of about 250, so the fit is made to fail here instead.
+    """
+    monkeypatch.setattr(resampling, "kaiser_window_chebyshev", lambda beta: None)
+    samples = np.cos(2.0 * np.pi * 0.21 * np.arange(_N, dtype=float) + 0.7)
+    index = np.arange(_N, dtype=float) - 0.37
+
+    got = resample_uniform_sinc(samples, index)
+    want = _resample_with_a_sinc_per_tap(samples, index)
+
+    interior = slice(DEFAULT_SINC_TAPS, _N - DEFAULT_SINC_TAPS)
+    assert np.allclose(got[interior], want[interior], rtol=0.0, atol=1e-14)
