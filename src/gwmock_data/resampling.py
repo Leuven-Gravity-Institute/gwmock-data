@@ -266,7 +266,10 @@ def _resample_block(
     coefficients = kaiser_window_chebyshev(beta)
     for offset in range(-half, half + 1):
         x = frac - offset
-        v = (x / denominator) ** 2
+        # `|x| <= denominator` in floating point, reaching it only as x rounds onto it, so `v <= 1`
+        # and the polynomial is never evaluated past its domain. Clamped anyway, as the device
+        # kernel does, so the two read alike.
+        v = np.minimum(1.0, (x / denominator) ** 2)
         if coefficients is None:
             window = np.i0(beta * np.sqrt(np.maximum(0.0, 1.0 - v))) / np.i0(beta)
         else:

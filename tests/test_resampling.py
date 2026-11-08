@@ -442,3 +442,24 @@ def test_a_beta_without_a_polynomial_window_keeps_the_exact_one(monkeypatch: pyt
 
     interior = slice(DEFAULT_SINC_TAPS, _N - DEFAULT_SINC_TAPS)
     assert np.allclose(got[interior], want[interior], rtol=0.0, atol=1e-14)
+
+
+def test_the_kernel_evaluates_the_polynomial_window_for_its_beta(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fit is what makes the kernel fast, and nothing about its output would show it was skipped.
+
+    The two windows differ by about 1e-14, inside every accuracy test here, so a kernel that stopped
+    consulting the fit would pass them all and only run slower. This asserts the fit is evaluated, with
+    the coefficients for the kernel's own beta.
+    """
+    consulted = []
+    chebval = np.polynomial.chebyshev.chebval
+
+    def spy(t, coefficients):
+        consulted.append(coefficients)
+        return chebval(t, coefficients)
+
+    monkeypatch.setattr(np.polynomial.chebyshev, "chebval", spy)
+    resample_uniform_sinc(np.cos(0.31 * np.arange(400.0)), np.arange(200.0, 300.0) - 0.37)
+
+    assert consulted, "the kernel never evaluated the polynomial window"
+    assert all(c == resampling.kaiser_window_chebyshev(DEFAULT_KAISER_BETA) for c in consulted)
