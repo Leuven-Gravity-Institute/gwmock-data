@@ -112,7 +112,11 @@ jobs:
                     #
                     # The `2>/dev/null` that used to be here is gone deliberately: it hid git-cliff
                     # failing, and an empty NEW_TAG would then have been tagged as the empty string.
-                    PROPOSED_TAG=$(uv run --frozen git-cliff --bumped-version --config cliff.toml)
+                    #
+                    # `--offline`: the version needs only the local history. Without it, the
+                    # `[remote.github]` section makes git-cliff fetch every commit and PR from GitHub
+                    # first, and a rate-limited or failed request aborts this step.
+                    PROPOSED_TAG=$(uv run --frozen git-cliff --bumped-version --offline --config cliff.toml)
                     NEW_TAG=$(uv run --frozen python scripts/release_version.py \
                       --current "$PREVIOUS_TAG" \
                       --proposed "$PROPOSED_TAG" \
@@ -150,9 +154,11 @@ jobs:
         uses: ./.github/workflows/release.yml # zizmor: ignore[self-repository]
         permissions:
             contents: write
-            id-token: write
+            pull-requests: read
         with:
             tag_name: ${{ needs.create_tag.outputs.new_tag }}
+        secrets:
+            CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
     publish:
         needs: [release, create_tag]
